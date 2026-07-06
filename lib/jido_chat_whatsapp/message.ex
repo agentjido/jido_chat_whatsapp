@@ -8,6 +8,9 @@ defmodule Jido.Chat.WhatsApp.Message do
   @doc "Converts an Amarula message into a plain payload map suitable for listener ingress."
   @spec to_payload(Amarula.Msg.t(), map()) :: map()
   def to_payload(%Amarula.Msg{} = msg, metadata \\ %{}) when is_map(metadata) do
+    forwarded = msg.forwarded == true
+    preview = normalize_content_value(msg.preview)
+
     %{
       id: msg.id,
       channel_jid: address_to_jid(msg.channel),
@@ -21,7 +24,9 @@ defmodule Jido.Chat.WhatsApp.Message do
       text: text_for(msg.type, msg.content),
       quoted: normalize_quoted(msg.quoted),
       mentions: Enum.map(List.wrap(msg.mentions), &address_to_jid/1),
-      metadata: Map.merge(%{source: :amarula}, metadata)
+      forwarded: forwarded,
+      preview: preview,
+      metadata: Map.merge(%{source: :amarula, forwarded: forwarded, preview: preview}, metadata)
     }
   end
 
@@ -34,6 +39,7 @@ defmodule Jido.Chat.WhatsApp.Message do
     from_jid = payload |> map_get([:from_jid, "from_jid", :from, "from"]) |> address_to_jid()
     to_jid = payload |> map_get([:to_jid, "to_jid", :to, "to"]) |> address_to_jid()
     type = payload |> map_get([:type, "type"]) |> normalize_type()
+    payload_metadata = payload |> map_get([:metadata, "metadata"]) |> normalize_metadata()
 
     if is_nil(channel_jid) do
       {:error, :missing_channel}
@@ -69,7 +75,12 @@ defmodule Jido.Chat.WhatsApp.Message do
          metadata: %{
            from_me: truthy?(map_get(payload, [:from_me, "from_me"])),
            message_type: type,
-           to_jid: to_jid
+           to_jid: to_jid,
+           forwarded:
+             truthy?(
+               map_get(payload, [:forwarded, "forwarded"]) || map_get(payload_metadata, [:forwarded, "forwarded"])
+             ),
+           preview: map_get(payload, [:preview, "preview"]) || map_get(payload_metadata, [:preview, "preview"])
          }
        }}
     end
@@ -253,6 +264,9 @@ defmodule Jido.Chat.WhatsApp.Message do
   end
 
   defp normalize_timestamp(value), do: value
+
+  defp normalize_metadata(%{} = metadata), do: metadata
+  defp normalize_metadata(_), do: %{}
 
   defp truthy?(value) when value in [true, "true", "1", 1], do: true
   defp truthy?(_), do: false

@@ -104,6 +104,18 @@ Bridge listener settings can include:
 }
 ```
 
+## Pairing
+
+Amarula ships a pairing task that can create the profile consumed by this adapter:
+
+```bash
+mix amarula.pair agent_primary
+mix amarula.pair agent_primary --phone 15551234567
+```
+
+Use the same profile name with `config :jido_chat_whatsapp, :profile` or with
+per-call/listener `:profile` options.
+
 ## Live Integration Test
 
 There is a live test module at:

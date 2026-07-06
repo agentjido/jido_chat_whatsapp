@@ -36,6 +36,7 @@ Thumbs.db
 .env
 .env.test
 /amarula/
+/amarula_data/
 /profiles/
 
 # Dialyzer cache.

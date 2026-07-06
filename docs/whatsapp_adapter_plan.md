@@ -7,7 +7,7 @@ The selected client is `amarula`, a pure Elixir WhatsApp Web client available on
 
 - [x] Scaffold `jido_chat_whatsapp` as a sibling Mix package.
 - [x] Align Mix metadata, docs, package metadata, formatter, Credo, and CI files with `jido_chat_telegram` and `jido_chat_discord`.
-- [x] Add `jido_chat ~> 1.0` and `amarula ~> 0.3.0` as published Hex dependencies.
+- [x] Add `jido_chat ~> 1.0` and `amarula ~> 0.4.4` as published Hex dependencies.
 - [x] Add local `.env.example` for live integration testing without committing credentials.
 - [x] Prepare to create the GitHub repository under `agentjido`:
 

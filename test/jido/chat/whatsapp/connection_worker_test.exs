@@ -130,6 +130,21 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     assert_receive {:sink_emit, %EventEnvelope{} = success, _opts}
     assert success.payload.action_id == "pairing_success"
 
+    send(pid, {:amarula, :pairing_failure, %{reason: :timeout}})
+    assert_receive {:sink_emit, %EventEnvelope{} = failure, _opts}
+    assert failure.payload.action_id == "pairing_failure"
+    assert failure.payload.value == "pairing_failure"
+
+    send(pid, {:amarula, :call_update, %{status: :offer}})
+    assert_receive {:sink_emit, %EventEnvelope{} = call, _opts}
+    assert call.payload.action_id == "call_update"
+    assert call.payload.value == "offer"
+
+    send(pid, {:amarula, :history_sync, %{chats: []}})
+    assert_receive {:sink_emit, %EventEnvelope{} = history, _opts}
+    assert history.payload.action_id == "history_sync"
+    assert history.payload.value == "history_sync"
+
     send(pid, {:amarula, :connection_update, %{qr: "qr-data"}})
     assert_receive {:sink_emit, %EventEnvelope{} = qr, _opts}
     assert qr.payload.action_id == "connection_update"

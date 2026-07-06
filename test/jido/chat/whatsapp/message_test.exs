@@ -32,6 +32,8 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
       content: "hello",
       quoted: %{id: "q1", from: Address.pn("15550000000"), channel: Address.pn("15551234567")},
       mentions: [Address.pn("15559990000")],
+      forwarded: true,
+      preview: %Amarula.Content.LinkPreview{url: "https://jido.run", title: "Jido"},
       raw: %Proto.Message{}
     }
 
@@ -43,6 +45,10 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
     assert payload.quoted.id == "q1"
     assert payload.mentions == ["15559990000@s.whatsapp.net"]
     assert payload.metadata.batch_id == "batch-1"
+    assert payload.forwarded == true
+    assert payload.preview.url == "https://jido.run"
+    assert payload.metadata.forwarded == true
+    assert payload.metadata.preview.title == "Jido"
   end
 
   test "incoming_attrs/1 rejects payloads without channels" do
@@ -61,6 +67,8 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
                "timestamp" => "1706745600",
                "type" => "text",
                "text" => "hello",
+               "forwarded" => "true",
+               "preview" => %{"url" => "https://jido.run"},
                "quoted" => %{"id" => "quoted-1"}
              })
 
@@ -69,6 +77,8 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
     assert attrs.timestamp == 1_706_745_600
     assert attrs.chat_type == :group
     assert attrs.metadata.from_me == true
+    assert attrs.metadata.forwarded == true
+    assert attrs.metadata.preview == %{"url" => "https://jido.run"}
   end
 
   test "incoming_attrs/1 derives media metadata" do

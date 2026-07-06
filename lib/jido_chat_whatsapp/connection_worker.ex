@@ -81,7 +81,15 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp control_event_envelope(event_type, data, state)
-       when event_type in [:connection_update, :pairing_code, :pairing_success, :error] do
+       when event_type in [
+              :connection_update,
+              :pairing_code,
+              :pairing_success,
+              :pairing_failure,
+              :call_update,
+              :history_sync,
+              :error
+            ] do
     raw = normalize_raw_data(data)
 
     payload =
@@ -120,6 +128,13 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
   defp event_value(:pairing_code, data) when is_map(data), do: to_string(Map.get(data, :code, "pairing_code"))
   defp event_value(:pairing_success, _data), do: "pairing_success"
+  defp event_value(:pairing_failure, _data), do: "pairing_failure"
+
+  defp event_value(:call_update, data) when is_map(data) do
+    data |> Map.get(:status, "call_update") |> to_string()
+  end
+
+  defp event_value(:history_sync, _data), do: "history_sync"
   defp event_value(:error, data), do: inspect(data)
   defp event_value(event_type, _data), do: to_string(event_type)
 
