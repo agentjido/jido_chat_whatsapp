@@ -129,35 +129,40 @@ There is a live test module at:
 
 - `test/jido/chat/whatsapp/live_integration_test.exs`
 
-It is skipped by default. To run the outbound smoke test after pairing a
-WhatsApp linked device:
+It is skipped by default. To run it after pairing a WhatsApp linked device:
 
 ```bash
 cp .env.example .env
 mix test test/jido/chat/whatsapp/live_integration_test.exs --include live
 ```
 
-Set `WHATSAPP_PROFILE` to the paired Amarula profile and `WHATSAPP_TEST_JID` to
-the recipient chat JID. If you paired with a non-default storage location, set
-`WHATSAPP_STORAGE_ROOT` to the same directory.
+Set `RUN_LIVE_WHATSAPP_TESTS=true`, `WHATSAPP_PROFILE` to the paired Amarula
+profile, and `WHATSAPP_TEST_JID` to the recipient chat JID. If you paired with a
+non-default storage location, set `WHATSAPP_STORAGE_ROOT` to the same directory.
 
-To run the interactive receive test, reply from the recipient WhatsApp account
-while the test is waiting:
+To include the interactive receive test, set `WHATSAPP_WAIT_FOR_REPLY=true` and
+reply from the recipient WhatsApp account while the test is waiting:
 
 ```bash
-mix test test/jido/chat/whatsapp/live_integration_test.exs \
-  --include live_receive
+RUN_LIVE_WHATSAPP_TESTS=true WHATSAPP_WAIT_FOR_REPLY=true \
+  mix test test/jido/chat/whatsapp/live_integration_test.exs --include live
 ```
 
 Current live coverage:
 
-- start an already paired Amarula profile
-- send text through the profile
-- optionally wait for an inbound reply and normalize it through the adapter
+- start one already paired Amarula profile for the suite
+- send, edit, and delete text messages
+- typing, metadata, and DM JID normalization
+- stream fallback through core `Jido.Chat.Adapter.stream/4`
+- lightweight quoted replies
+- reaction add/remove
+- local file uploads from disk paths and in-memory byte payloads
+- canonical text and single-file posts through core `post_message/4`
+- optional manual receive normalization when `WHATSAPP_WAIT_FOR_REPLY=true`
+- unsupported-core contract checks
 
 Planned live coverage:
 
 - QR pairing lifecycle
 - receive-to-reply loop through `jido_messaging`
-- media send
-- reactions, edits, revokes, and typing state
+- image/video/audio-specific media sends

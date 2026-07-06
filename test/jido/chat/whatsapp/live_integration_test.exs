@@ -1,52 +1,293 @@
 defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   use ExUnit.Case, async: false
 
+  alias Jido.Chat.Adapter, as: ChatAdapter
+  alias Jido.Chat.FileUpload
+  alias Jido.Chat.PostPayload
   alias Jido.Chat.WhatsApp.Adapter
   alias Jido.Chat.WhatsApp.Message
 
-  @default_open_timeout_ms 30_000
-  @default_reply_timeout_ms 180_000
+  @truthy ["1", "true", "TRUE", "yes", "on"]
+  @run_live System.get_env("RUN_LIVE_WHATSAPP_TESTS") in @truthy
+  @profile System.get_env("WHATSAPP_PROFILE")
+  @jid System.get_env("WHATSAPP_TEST_JID")
+  @phone System.get_env("WHATSAPP_TEST_PHONE")
+  @reaction System.get_env("WHATSAPP_TEST_REACTION") || "\u{1F44D}"
+  @wait_for_reply System.get_env("WHATSAPP_WAIT_FOR_REPLY") in @truthy
 
-  setup do
-    profile = fetch_env!("WHATSAPP_PROFILE")
-    jid = fetch_env!("WHATSAPP_TEST_JID")
+  @moduletag :live
+  @moduletag :whatsapp_live
 
-    {:ok, _conn, started?} = start_connection!(profile)
+  if not @run_live do
+    @moduletag skip: "set RUN_LIVE_WHATSAPP_TESTS=true to run live WhatsApp integration tests"
+  end
+
+  if @run_live and (@profile in [nil, ""] or @jid in [nil, ""]) do
+    @moduletag skip: "set WHATSAPP_PROFILE and WHATSAPP_TEST_JID when RUN_LIVE_WHATSAPP_TESTS=true"
+  end
+
+  setup_all do
+    if @run_live and @profile not in [nil, ""] and @jid not in [nil, ""] do
+      {:ok, conn, started?} = start_connection!(@profile)
+      :ok = ensure_open!(conn, @profile)
+
+      on_exit(fn ->
+        if started?, do: Amarula.stop(@profile)
+      end)
+
+      {:ok, conn: conn, profile: @profile, jid: @jid}
+    else
+      {:ok, conn: nil, profile: @profile, jid: @jid}
+    end
+  end
+
+  setup ctx do
+    if ctx.conn do
+      :ok = Amarula.set_parent(ctx.conn, self())
+      drain_amarula_events()
+      :ok = ensure_open!(ctx.conn, ctx.profile)
+    end
+
+    {:ok, opts: [profile: ctx.profile]}
+  end
+
+  test "send/edit/delete message against live WhatsApp linked device", ctx do
+    text = "jido whatsapp live #{System.system_time(:millisecond)}"
+
+    assert {:ok, sent} = Adapter.send_message(ctx.jid, text, ctx.opts)
+    message_id = response_id(sent)
+    assert is_binary(message_id)
+
+    assert {:ok, edited} =
+             Adapter.edit_message(ctx.jid, message_id, text <> " (edited)", ctx.opts)
+
+    assert edited.status == :edited
+    assert edited.external_room_id == ctx.jid
+    assert is_binary(response_id(edited))
+
+    assert :ok = Adapter.delete_message(ctx.jid, message_id, ctx.opts)
+  end
+
+  test "typing, metadata, and open_dm calls succeed against live WhatsApp session", ctx do
+    assert :ok = Adapter.start_typing(ctx.jid, ctx.opts)
+
+    assert {:ok, info} = Adapter.fetch_metadata(ctx.jid, ctx.opts)
+    assert info.id == ctx.jid
+    assert info.channel_type == :whatsapp
+    assert info.is_dm == not String.ends_with?(ctx.jid, "@g.us")
+
+    assert {:ok, dm_jid} = Adapter.open_dm(@phone || phone_from_jid(ctx.jid), ctx.opts)
+    assert dm_jid == ctx.jid
+  end
+
+  test "stream fallback sends a visible draft and edits it to final content", ctx do
+    parts = ["jido", " whatsapp", " stream", " fallback"]
+
+    assert {:ok, sent} =
+             ChatAdapter.stream(
+               Adapter,
+               ctx.jid,
+               parts,
+               Keyword.merge(ctx.opts,
+                 placeholder_text: "jido whatsapp draft...",
+                 update_every: 1
+               )
+             )
+
+    message_id = response_id(sent)
+    assert is_binary(message_id)
 
     on_exit(fn ->
-      if started?, do: Amarula.stop(profile)
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, message_id, ctx.opts)
+      end)
+    end)
+  end
+
+  test "reply continuity sends a lightweight quoted reply", ctx do
+    root_text = "jido whatsapp reply root #{System.system_time(:millisecond)}"
+    reply_text = "jido whatsapp reply child #{System.system_time(:millisecond)}"
+
+    assert {:ok, root} = Adapter.send_message(ctx.jid, root_text, ctx.opts)
+    root_id = response_id(root)
+
+    on_exit(fn ->
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, root_id, ctx.opts)
+      end)
     end)
 
-    assert_open!(profile)
+    assert {:ok, reply} =
+             Adapter.send_message(
+               ctx.jid,
+               reply_text,
+               Keyword.put(ctx.opts, :quoted, {root_id, ctx.jid})
+             )
 
-    {:ok, profile: profile, jid: jid}
+    reply_id = response_id(reply)
+
+    on_exit(fn ->
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, reply_id, ctx.opts)
+      end)
+    end)
+
+    assert is_binary(root_id)
+    assert is_binary(reply_id)
+    refute reply_id == root_id
   end
 
-  @tag :live
-  test "send text through a paired Amarula profile", %{profile: profile, jid: jid} do
-    text = "jido_chat_whatsapp live smoke #{timestamp()}"
+  test "reaction flow succeeds against live WhatsApp session", ctx do
+    assert {:ok, sent} =
+             Adapter.send_message(
+               ctx.jid,
+               "jido whatsapp reaction target #{System.system_time(:millisecond)}",
+               ctx.opts
+             )
 
-    assert {:ok, response} =
-             Adapter.send_message(jid, text, profile: profile)
+    message_id = response_id(sent)
 
-    assert response.external_message_id
-    assert response.external_room_id == jid
-    assert response.status == :sent
+    on_exit(fn ->
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, message_id, ctx.opts)
+      end)
+    end)
+
+    assert :ok = Adapter.add_reaction(ctx.jid, message_id, @reaction, ctx.opts)
+    assert :ok = Adapter.remove_reaction(ctx.jid, message_id, @reaction, ctx.opts)
   end
 
-  @tag :live_receive
-  test "receives a reply from WhatsApp", %{profile: profile, jid: jid} do
-    text = "jido_chat_whatsapp reply test #{timestamp()} - please reply to this message"
+  test "send_file uploads local paths and in-memory byte payloads", ctx do
+    path =
+      write_temp_file(
+        "jido-whatsapp-live-",
+        ".txt",
+        "whatsapp live file #{System.system_time(:millisecond)}\n"
+      )
 
-    assert {:ok, response} = Adapter.send_message(jid, text, profile: profile)
-    assert response.external_message_id
+    on_exit(fn ->
+      File.rm(path)
+    end)
 
-    assert {:ok, msg} = receive_incoming_reply(reply_timeout_ms())
-    assert {:ok, incoming} = Adapter.transform_incoming(msg)
+    assert {:ok, path_response} =
+             Adapter.send_file(
+               ctx.jid,
+               FileUpload.new(%{
+                 kind: :file,
+                 path: path,
+                 filename: Path.basename(path),
+                 media_type: "text/plain"
+               }),
+               ctx.opts
+             )
 
-    assert incoming.external_message_id == msg.id
-    assert incoming.external_room_id == Message.address_to_jid(msg.channel)
-    assert incoming.metadata.from_me == false
+    path_message_id = response_id(path_response)
+
+    on_exit(fn ->
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, path_message_id, ctx.opts)
+      end)
+    end)
+
+    assert {:ok, bytes_response} =
+             Adapter.send_file(
+               ctx.jid,
+               FileUpload.new(%{
+                 kind: :file,
+                 data: "whatsapp live bytes #{System.system_time(:millisecond)}\n",
+                 filename: "whatsapp-live-bytes.txt",
+                 media_type: "text/plain"
+               }),
+               ctx.opts
+             )
+
+    bytes_message_id = response_id(bytes_response)
+
+    on_exit(fn ->
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, bytes_message_id, ctx.opts)
+      end)
+    end)
+
+    assert is_binary(path_message_id)
+    assert is_binary(bytes_message_id)
+  end
+
+  test "core post_message fallback sends text and canonical single-file payloads", ctx do
+    text_payload =
+      PostPayload.new(%{
+        text: "jido whatsapp canonical text #{System.system_time(:millisecond)}"
+      })
+
+    assert {:ok, text_response} = ChatAdapter.post_message(Adapter, ctx.jid, text_payload, ctx.opts)
+    text_message_id = response_id(text_response)
+
+    on_exit(fn ->
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, text_message_id, ctx.opts)
+      end)
+    end)
+
+    file_payload =
+      PostPayload.new(%{
+        text: "jido whatsapp canonical file #{System.system_time(:millisecond)}",
+        files: [
+          %{
+            kind: :file,
+            data: "whatsapp canonical bytes #{System.system_time(:millisecond)}\n",
+            filename: "whatsapp-canonical.txt",
+            media_type: "text/plain"
+          }
+        ]
+      })
+
+    assert {:ok, file_response} = ChatAdapter.post_message(Adapter, ctx.jid, file_payload, ctx.opts)
+    file_message_id = response_id(file_response)
+
+    on_exit(fn ->
+      cleanup_delete(fn ->
+        Adapter.delete_message(ctx.jid, file_message_id, ctx.opts)
+      end)
+    end)
+
+    assert is_binary(text_message_id)
+    assert is_binary(file_message_id)
+  end
+
+  @tag :whatsapp_live_receive
+  test "receives and normalizes a manual WhatsApp reply when enabled", ctx do
+    if @wait_for_reply do
+      prompt = "jido whatsapp receive test #{System.system_time(:millisecond)} - please reply"
+
+      :ok = Amarula.set_parent(ctx.conn, self())
+      drain_amarula_events()
+
+      assert {:ok, sent} = Adapter.send_message(ctx.jid, prompt, ctx.opts)
+      assert is_binary(response_id(sent))
+
+      assert {:ok, msg} = receive_incoming_reply(ctx.jid, reply_timeout_ms())
+      assert {:ok, incoming} = Adapter.transform_incoming(msg)
+
+      assert incoming.external_message_id == msg.id
+      assert incoming.external_room_id == Message.address_to_jid(msg.channel)
+      assert incoming.metadata.from_me == false
+    else
+      refute @wait_for_reply
+    end
+  end
+
+  test "unsupported core surfaces remain explicit unsupported contracts", ctx do
+    assert {:error, :unsupported} = ChatAdapter.fetch_message(Adapter, ctx.jid, "missing", ctx.opts)
+    assert {:error, :unsupported} = ChatAdapter.fetch_messages(Adapter, ctx.jid, ctx.opts)
+    assert {:error, :unsupported} = ChatAdapter.fetch_channel_messages(Adapter, ctx.jid, ctx.opts)
+    assert {:error, :unsupported} = ChatAdapter.list_threads(Adapter, ctx.jid, ctx.opts)
+    assert {:error, :unsupported} = ChatAdapter.open_thread(Adapter, ctx.jid, nil, ctx.opts)
+
+    assert {:error, :unsupported} =
+             ChatAdapter.post_ephemeral(Adapter, ctx.jid, "whatsapp-user", "secret", ctx.opts)
+
+    assert {:error, :unsupported} =
+             ChatAdapter.open_modal(Adapter, ctx.jid, %{title: "modal"}, ctx.opts)
   end
 
   defp start_connection!(profile) do
@@ -84,7 +325,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     case System.get_env(env_name) do
       nil -> config
       "" -> config
-      value -> Map.put(config, key, value in ["1", "true", "TRUE", "yes", "YES"])
+      value -> Map.put(config, key, value in @truthy)
     end
   end
 
@@ -104,8 +345,24 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     end
   end
 
-  defp assert_open!(profile) do
-    case wait_for_open(open_timeout_ms(), []) do
+  defp ensure_open!(nil, _profile), do: :ok
+
+  defp ensure_open!(conn, profile) do
+    case Amarula.connection_state(conn) do
+      :connected ->
+        :ok
+
+      :connecting ->
+        assert_open!(profile, open_timeout_ms())
+
+      _other ->
+        :ok = Amarula.reconnect(conn)
+        assert_open!(profile, open_timeout_ms())
+    end
+  end
+
+  defp assert_open!(profile, timeout_ms) do
+    case wait_for_open(timeout_ms, []) do
       :ok ->
         :ok
 
@@ -129,10 +386,10 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     end)
   end
 
-  defp receive_incoming_reply(timeout_ms) do
+  defp receive_incoming_reply(expected_jid, timeout_ms) do
     receive_until(timeout_ms, [], fn
       {:amarula, :messages_upsert, %{messages: messages}}, events ->
-        case Enum.find(messages, &incoming_reply?/1) do
+        case Enum.find(messages, &incoming_reply?(&1, expected_jid)) do
           nil -> {:cont, [{:messages_upsert, length(messages)} | events]}
           msg -> {:halt, {:ok, msg}}
         end
@@ -166,9 +423,22 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     end
   end
 
-  defp incoming_reply?(%Amarula.Msg{from_me: false, type: type}) when type in [:text, "text"], do: true
-  defp incoming_reply?(%Amarula.Msg{from_me: false}), do: true
-  defp incoming_reply?(_msg), do: false
+  defp incoming_reply?(%Amarula.Msg{from_me: true}, _expected_jid), do: false
+
+  defp incoming_reply?(%Amarula.Msg{} = msg, expected_jid) do
+    Message.address_to_jid(msg.channel) == expected_jid or
+      Message.address_to_jid(msg.from) == expected_jid
+  end
+
+  defp incoming_reply?(_msg, _expected_jid), do: false
+
+  defp drain_amarula_events do
+    receive do
+      {:amarula, _event, _data} -> drain_amarula_events()
+    after
+      0 -> :ok
+    end
+  end
 
   defp summarize_event({:amarula, event, data}), do: {event, summarize_data(data)}
   defp summarize_event(event), do: event
@@ -180,15 +450,8 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   defp summarize_data(reason) when is_atom(reason) or is_binary(reason), do: reason
   defp summarize_data(reason), do: inspect(reason)
 
-  defp fetch_env!(name) do
-    case System.fetch_env(name) do
-      {:ok, value} when value != "" -> value
-      _missing -> raise "missing required live test env var #{name}"
-    end
-  end
-
-  defp open_timeout_ms, do: env_integer("WHATSAPP_OPEN_TIMEOUT_MS", @default_open_timeout_ms)
-  defp reply_timeout_ms, do: env_integer("WHATSAPP_REPLY_TIMEOUT_MS", @default_reply_timeout_ms)
+  defp open_timeout_ms, do: env_integer("WHATSAPP_OPEN_TIMEOUT_MS", 30_000)
+  defp reply_timeout_ms, do: env_integer("WHATSAPP_REPLY_TIMEOUT_MS", 180_000)
 
   defp env_integer(name, default) do
     case System.get_env(name) do
@@ -206,9 +469,35 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     end
   end
 
-  defp timestamp do
-    DateTime.utc_now()
-    |> DateTime.truncate(:second)
-    |> DateTime.to_iso8601()
+  defp response_id(%{external_message_id: value}) when is_binary(value), do: value
+  defp response_id(%{message_id: value}) when is_binary(value), do: value
+  defp response_id(_response), do: nil
+
+  defp phone_from_jid(jid) do
+    jid
+    |> to_string()
+    |> String.split("@", parts: 2)
+    |> hd()
+    |> String.split(":", parts: 2)
+    |> hd()
+  end
+
+  defp write_temp_file(prefix, suffix, contents) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "#{prefix}#{System.unique_integer([:positive])}#{suffix}"
+      )
+
+    File.write!(path, contents)
+    path
+  end
+
+  defp cleanup_delete(fun) when is_function(fun, 0) do
+    case fun.() do
+      :ok -> :ok
+      {:ok, _result} -> :ok
+      {:error, _reason} -> :ok
+    end
   end
 end

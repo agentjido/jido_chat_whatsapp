@@ -53,8 +53,8 @@ gh repo create agentjido/jido_chat_whatsapp \
 - [x] Unit test outbound transport delegation.
 - [x] Unit test listener child spec construction.
 - [x] Unit test connection lifecycle event forwarding.
-- [x] Add skipped-by-default live integration tests that start a paired Amarula profile.
-- [x] Add an opt-in live receive test that waits for a manual WhatsApp reply.
+- [x] Add a skipped-by-default live integration suite gated by `RUN_LIVE_WHATSAPP_TESTS`.
+- [x] Cover send/edit/delete, typing, metadata, stream fallback, quoted replies, reactions, file uploads, core `post_message/4`, unsupported surfaces, and optional manual receive normalization.
 - [ ] Add automated receive-to-reply loop coverage through `jido_messaging`.
 
 ## Epic 6: Live Testing Findings
