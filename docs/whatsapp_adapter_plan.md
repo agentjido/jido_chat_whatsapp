@@ -53,10 +53,20 @@ gh repo create agentjido/jido_chat_whatsapp \
 - [x] Unit test outbound transport delegation.
 - [x] Unit test listener child spec construction.
 - [x] Unit test connection lifecycle event forwarding.
-- [x] Add a skipped-by-default live integration test scaffold.
-- [ ] Add live receive/send loop tests after the WhatsApp account is paired.
+- [x] Add skipped-by-default live integration tests that start a paired Amarula profile.
+- [x] Add an opt-in live receive test that waits for a manual WhatsApp reply.
+- [ ] Add automated receive-to-reply loop coverage through `jido_messaging`.
 
-## Epic 6: Review and Release Readiness
+## Epic 6: Live Testing Findings
+
+- [x] Registered a WhatsApp Business test account with a Google Voice number.
+- [x] Paired Amarula profile `jido_chat_whatsapp_live` by phone-code login.
+- [x] Confirmed WhatsApp lists Amarula as `Google Chrome (macOS)` because Amarula uses the WhatsApp Web linked-device protocol by default.
+- [x] Sent a live outbound message to a personal WhatsApp account and received delivered receipts.
+- [ ] Resolve the post-send reconnect failure where the stored credentials now fail before `:open` with WhatsApp `401` connection failures while the linked device is still visible on the phone.
+- [ ] Re-run the opt-in receive test after the profile is re-paired or the Amarula reconnect issue is understood.
+
+## Epic 7: Review and Release Readiness
 
 - [x] Run dependency fetch, compilation, formatting, and tests locally.
 - [x] Review public API and docs before repository creation.

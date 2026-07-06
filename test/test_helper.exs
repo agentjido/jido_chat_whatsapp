@@ -1,4 +1,4 @@
-ExUnit.start(exclude: [:live])
+ExUnit.start(exclude: [:live, :live_receive])
 
 for env_file <- [".env", ".env.test"], File.exists?(env_file) do
   Dotenvy.source!(env_file)

@@ -109,6 +109,8 @@ Bridge listener settings can include:
 Amarula ships a pairing task that can create the profile consumed by this adapter:
 
 ```bash
+export AMARULA_DATA_DIR="$PWD/amarula_data"
+
 mix amarula.pair agent_primary
 mix amarula.pair agent_primary --phone 15551234567
 ```
@@ -116,28 +118,46 @@ mix amarula.pair agent_primary --phone 15551234567
 Use the same profile name with `config :jido_chat_whatsapp, :profile` or with
 per-call/listener `:profile` options.
 
+The linked device will usually appear in WhatsApp as `Google Chrome (macOS)`.
+That is expected: Amarula connects through the WhatsApp Web linked-device
+protocol and presents a browser identity by default. QR pairing and phone-code
+pairing both create the same kind of linked device.
+
 ## Live Integration Test
 
 There is a live test module at:
 
 - `test/jido/chat/whatsapp/live_integration_test.exs`
 
-It is skipped by default. To run it after pairing a WhatsApp linked device:
+It is skipped by default. To run the outbound smoke test after pairing a
+WhatsApp linked device:
 
 ```bash
 cp .env.example .env
 mix test test/jido/chat/whatsapp/live_integration_test.exs --include live
 ```
 
-Current live coverage is intentionally small until a test WhatsApp account is
-available:
+Set `WHATSAPP_PROFILE` to the paired Amarula profile and `WHATSAPP_TEST_JID` to
+the recipient chat JID. If you paired with a non-default storage location, set
+`WHATSAPP_STORAGE_ROOT` to the same directory.
 
-- send text through an already paired Amarula profile
+To run the interactive receive test, reply from the recipient WhatsApp account
+while the test is waiting:
+
+```bash
+mix test test/jido/chat/whatsapp/live_integration_test.exs \
+  --include live_receive
+```
+
+Current live coverage:
+
+- start an already paired Amarula profile
+- send text through the profile
+- optionally wait for an inbound reply and normalize it through the adapter
 
 Planned live coverage:
 
 - QR pairing lifecycle
-- inbound message receive
 - receive-to-reply loop through `jido_messaging`
 - media send
 - reactions, edits, revokes, and typing state
