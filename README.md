@@ -148,9 +148,34 @@ RUN_LIVE_WHATSAPP_TESTS=true WHATSAPP_WAIT_FOR_REPLY=true \
   mix test test/jido/chat/whatsapp/live_integration_test.exs --include live
 ```
 
+Fresh or restricted WhatsApp accounts may authenticate successfully but reject
+outbound sends with server ack errors such as `{:send_rejected, "463"}`. To
+verify linked-device connectivity without sending messages:
+
+```bash
+RUN_LIVE_WHATSAPP_TESTS=true \
+  mix test test/jido/chat/whatsapp/live_integration_test.exs \
+    --include live --exclude whatsapp_live_outbound
+```
+
+To test a single throttled outbound text message:
+
+```bash
+RUN_LIVE_WHATSAPP_TESTS=true WHATSAPP_LIVE_SEND_DELAY_MS=60000 \
+  mix test test/jido/chat/whatsapp/live_integration_test.exs \
+    --include live --only whatsapp_live_outbound_smoke
+```
+
+The send-heavy live tests are tagged `:whatsapp_live_destructive` and wait
+`WHATSAPP_LIVE_SEND_DELAY_MS` plus optional `WHATSAPP_LIVE_SEND_JITTER_MS`
+before each outbound test. Keep those tests opt-in for accounts with enough
+WhatsApp reputation to tolerate edit/delete/reaction/media coverage.
+
 Current live coverage:
 
 - start one already paired Amarula profile for the suite
+- linked-device connectivity and metadata checks
+- single throttled outbound text smoke test
 - send, edit, and delete text messages
 - typing, metadata, and DM JID normalization
 - stream fallback through core `Jido.Chat.Adapter.stream/4`

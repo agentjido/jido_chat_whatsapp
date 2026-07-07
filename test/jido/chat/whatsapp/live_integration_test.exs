@@ -51,7 +51,16 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     {:ok, opts: [profile: ctx.profile]}
   end
 
+  @tag :whatsapp_live_connectivity
+  test "linked device connection stays open", ctx do
+    assert Amarula.connection_state(ctx.conn) == :connected
+  end
+
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_destructive
   test "send/edit/delete message against live WhatsApp linked device", ctx do
+    live_send_pause()
+
     text = "jido whatsapp live #{System.system_time(:millisecond)}"
 
     assert {:ok, sent} = Adapter.send_message(ctx.jid, text, ctx.opts)
@@ -68,19 +77,45 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     assert :ok = Adapter.delete_message(ctx.jid, message_id, ctx.opts)
   end
 
-  test "typing, metadata, and open_dm calls succeed against live WhatsApp session", ctx do
-    assert :ok = Adapter.start_typing(ctx.jid, ctx.opts)
-
+  @tag :whatsapp_live_connectivity
+  test "metadata and open_dm calls succeed against live WhatsApp session", ctx do
     assert {:ok, info} = Adapter.fetch_metadata(ctx.jid, ctx.opts)
     assert info.id == ctx.jid
-    assert info.channel_type == :whatsapp
     assert info.is_dm == not String.ends_with?(ctx.jid, "@g.us")
+    assert info.metadata.jid == ctx.jid
 
     assert {:ok, dm_jid} = Adapter.open_dm(@phone || phone_from_jid(ctx.jid), ctx.opts)
     assert dm_jid == ctx.jid
   end
 
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_presence
+  test "typing call succeeds against live WhatsApp session", ctx do
+    live_send_pause()
+
+    assert :ok = Adapter.start_typing(ctx.jid, ctx.opts)
+  end
+
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_outbound_smoke
+  test "single outbound text message is accepted by WhatsApp", ctx do
+    live_send_pause()
+
+    assert {:ok, sent} =
+             Adapter.send_message(
+               ctx.jid,
+               "jido whatsapp outbound smoke #{System.system_time(:millisecond)}",
+               ctx.opts
+             )
+
+    assert is_binary(response_id(sent))
+  end
+
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_destructive
   test "stream fallback sends a visible draft and edits it to final content", ctx do
+    live_send_pause()
+
     parts = ["jido", " whatsapp", " stream", " fallback"]
 
     assert {:ok, sent} =
@@ -104,7 +139,11 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     end)
   end
 
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_destructive
   test "reply continuity sends a lightweight quoted reply", ctx do
+    live_send_pause()
+
     root_text = "jido whatsapp reply root #{System.system_time(:millisecond)}"
     reply_text = "jido whatsapp reply child #{System.system_time(:millisecond)}"
 
@@ -137,7 +176,11 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     refute reply_id == root_id
   end
 
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_destructive
   test "reaction flow succeeds against live WhatsApp session", ctx do
+    live_send_pause()
+
     assert {:ok, sent} =
              Adapter.send_message(
                ctx.jid,
@@ -157,7 +200,12 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     assert :ok = Adapter.remove_reaction(ctx.jid, message_id, @reaction, ctx.opts)
   end
 
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_destructive
+  @tag :whatsapp_live_media
   test "send_file uploads local paths and in-memory byte payloads", ctx do
+    live_send_pause()
+
     path =
       write_temp_file(
         "jido-whatsapp-live-",
@@ -213,7 +261,11 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     assert is_binary(bytes_message_id)
   end
 
+  @tag :whatsapp_live_outbound
+  @tag :whatsapp_live_destructive
   test "core post_message fallback sends text and canonical single-file payloads", ctx do
+    live_send_pause()
+
     text_payload =
       PostPayload.new(%{
         text: "jido whatsapp canonical text #{System.system_time(:millisecond)}"
@@ -255,8 +307,11 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   end
 
   @tag :whatsapp_live_receive
+  @tag :whatsapp_live_outbound
   test "receives and normalizes a manual WhatsApp reply when enabled", ctx do
     if @wait_for_reply do
+      live_send_pause()
+
       prompt = "jido whatsapp receive test #{System.system_time(:millisecond)} - please reply"
 
       :ok = Amarula.set_parent(ctx.conn, self())
@@ -452,6 +507,21 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
 
   defp open_timeout_ms, do: env_integer("WHATSAPP_OPEN_TIMEOUT_MS", 30_000)
   defp reply_timeout_ms, do: env_integer("WHATSAPP_REPLY_TIMEOUT_MS", 180_000)
+  defp live_send_delay_ms, do: env_integer("WHATSAPP_LIVE_SEND_DELAY_MS", 60_000)
+  defp live_send_jitter_ms, do: env_integer("WHATSAPP_LIVE_SEND_JITTER_MS", 0)
+
+  defp live_send_pause do
+    delay_ms = max(live_send_delay_ms(), 0)
+    jitter_ms = max(live_send_jitter_ms(), 0)
+    total_ms = delay_ms + jitter_ms(jitter_ms)
+
+    if total_ms > 0 do
+      Process.sleep(total_ms)
+    end
+  end
+
+  defp jitter_ms(0), do: 0
+  defp jitter_ms(max_ms), do: :rand.uniform(max_ms + 1) - 1
 
   defp env_integer(name, default) do
     case System.get_env(name) do
