@@ -58,7 +58,8 @@ defmodule Jido.Chat.WhatsApp.MixProject do
   defp deps do
     [
       {:jido_chat, "~> 1.0"},
-      {:amarula, "~> 0.4.4"},
+      {:amarula, "~> 0.5.0"},
+      {:protobuf, "~> 0.16.1", override: true},
       {:zoi, "~> 0.18"},
       {:dotenvy, "~> 1.1", only: [:test]},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

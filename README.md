@@ -72,7 +72,12 @@ This is the expected mode for `jido_messaging` bridges.
     },
     sink_mfa: {Jido.Messaging.IngressSink, :emit, [MyApp.Messaging, "bridge_wa"]}
   )
+
+children = [Amarula.Supervisor | specs]
 ```
+
+Start the shared `Amarula.Supervisor` before the generated connection workers.
+Only one shared Amarula supervisor is needed in the host application's supervision tree.
 
 On first pairing Amarula emits QR and pairing lifecycle updates. The worker
 forwards those as non-message action events. Chat messages from

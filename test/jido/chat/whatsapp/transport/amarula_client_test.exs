@@ -3,6 +3,11 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
 
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
+  setup_all do
+    start_supervised!(Amarula.Supervisor)
+    :ok
+  end
+
   test "resolve_conn/1 handles explicit connections and missing profiles" do
     pid = self()
 

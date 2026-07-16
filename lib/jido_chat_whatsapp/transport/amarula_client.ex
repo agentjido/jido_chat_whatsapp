@@ -24,10 +24,7 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
         {:ok, conn}
 
       profile = configured_profile(opts) ->
-        case Amarula.whereis(profile) do
-          nil -> {:error, :connection_not_running}
-          _pid -> {:ok, Amarula.via(profile)}
-        end
+        resolve_profile(profile)
 
       true ->
         {:error, :missing_profile}
@@ -74,6 +71,15 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
 
   @impl true
   def request_pairing_code(conn, phone, opts), do: Amarula.request_pairing_code(conn, phone, opts)
+
+  defp resolve_profile(profile) do
+    case Amarula.whereis(profile) do
+      nil -> {:error, :connection_not_running}
+      _pid -> {:ok, Amarula.via(profile)}
+    end
+  rescue
+    RuntimeError -> {:error, :connection_not_running}
+  end
 
   defp configured_profile(opts) do
     Keyword.get(opts, :profile) ||
