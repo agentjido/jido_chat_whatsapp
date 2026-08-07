@@ -32,6 +32,9 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     def send_media(_conn, _jid, _media_type, _data, _opts), do: {:ok, "msg"}
 
     @impl true
+    def download_media(_media), do: {:error, :unsupported}
+
+    @impl true
     def send_reaction(_conn, _message_ref, _emoji), do: {:ok, "msg"}
 
     @impl true

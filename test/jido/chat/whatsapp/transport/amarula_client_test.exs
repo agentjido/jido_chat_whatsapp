@@ -43,4 +43,10 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
     assert :ok = AmarulaClient.send_chatstate(conn, "15551234567@s.whatsapp.net", :paused)
     assert {:error, _reason} = AmarulaClient.send_media(conn, "15551234567@s.whatsapp.net", :image, "bytes", [])
   end
+
+  test "download_media/1 delegates invalid descriptors to Amarula" do
+    media = %Amarula.Content.Media{kind: :image}
+
+    assert {:error, :invalid_media} = AmarulaClient.download_media(media)
+  end
 end

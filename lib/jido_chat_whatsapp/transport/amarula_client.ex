@@ -58,6 +58,9 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   end
 
   @impl true
+  def download_media(media), do: Amarula.download_media(media)
+
+  @impl true
   def send_reaction(conn, message_ref, emoji), do: Amarula.send_reaction(conn, message_ref, emoji)
 
   @impl true
