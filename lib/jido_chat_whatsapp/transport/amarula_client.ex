@@ -58,7 +58,17 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   end
 
   @impl true
-  def download_media(media), do: Amarula.download_media(media)
+  def download_media(media) do
+    Amarula.download_media(media)
+  rescue
+    exception ->
+      Logger.warning("WhatsApp download_media failed: #{Exception.message(exception)}")
+      {:error, exception}
+  catch
+    kind, reason ->
+      Logger.warning("WhatsApp download_media failed: #{inspect({kind, reason})}")
+      {:error, {kind, reason}}
+  end
 
   @impl true
   def send_reaction(conn, message_ref, emoji), do: Amarula.send_reaction(conn, message_ref, emoji)

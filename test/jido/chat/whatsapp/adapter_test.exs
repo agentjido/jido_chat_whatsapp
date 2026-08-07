@@ -106,6 +106,9 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
   end
 
   test "transform_incoming/1 normalizes media payloads" do
+    media_key = String.duplicate("k", 32)
+    encrypted_hash = String.duplicate("h", 32)
+
     payload = %{
       "id" => "msg-2",
       "channel_jid" => "120363000000000000@g.us",
@@ -117,8 +120,8 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
         "caption" => "look",
         "file_length" => 123,
         "direct_path" => "/mms/image/encrypted",
-        "media_key" => "media-key",
-        "file_enc_sha256" => "encrypted-hash",
+        "media_key" => media_key,
+        "file_enc_sha256" => encrypted_hash,
         "width" => 640,
         "height" => 480
       }
@@ -137,17 +140,20 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
                        kind: :image,
                        mimetype: "image/jpeg",
                        direct_path: "/mms/image/encrypted",
-                       media_key: "media-key",
-                       file_enc_sha256: "encrypted-hash"
+                       media_key: ^media_key,
+                       file_enc_sha256: ^encrypted_hash
                      }}
   end
 
-  test "fetch_media/2 accepts descriptor maps and rejects unsupported references" do
+  test "fetch_media/2 accepts valid descriptor maps" do
+    media_key = String.duplicate("d", 32)
+    encrypted_hash = String.duplicate("e", 32)
+
     reference = %{
       "kind" => "document",
       "direct_path" => "/mms/document/encrypted",
-      "media_key" => "document-key",
-      "file_enc_sha256" => "document-hash",
+      "media_key" => media_key,
+      "file_enc_sha256" => encrypted_hash,
       "file_name" => "report.pdf"
     }
 
@@ -158,13 +164,66 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
                      %Amarula.Content.Media{
                        kind: :document,
                        direct_path: "/mms/document/encrypted",
-                       media_key: "document-key",
-                       file_enc_sha256: "document-hash",
+                       media_key: ^media_key,
+                       file_enc_sha256: ^encrypted_hash,
                        file_name: "report.pdf"
                      }}
+  end
 
-    assert {:error, :invalid_media_reference} =
-             Adapter.fetch_media("/mms/image/not-enough-data", transport: MockTransport)
+  test "fetch_media/2 prefers provider metadata and validates references" do
+    media_key = String.duplicate("m", 32)
+
+    media =
+      Jido.Chat.Media.new(%{
+        kind: :file,
+        url: "https://example.com/untrusted",
+        metadata: %{
+          "kind" => "sticker",
+          "direct_path" => "/mms/image/sticker",
+          "media_key" => media_key
+        }
+      })
+
+    assert {:ok, "whatsapp media bytes"} =
+             Adapter.fetch_media(media, transport: MockTransport)
+
+    assert_received {:download_media,
+                     %Amarula.Content.Media{
+                       kind: :sticker,
+                       direct_path: "/mms/image/sticker",
+                       media_key: ^media_key,
+                       url: nil
+                     }}
+
+    valid_url_reference = %{
+      kind: :image,
+      url: "https://mmg.whatsapp.net/mms/image/encrypted",
+      media_key: media_key
+    }
+
+    assert {:ok, "whatsapp media bytes"} =
+             Adapter.fetch_media(valid_url_reference, transport: MockTransport)
+
+    assert_received {:download_media, %Amarula.Content.Media{url: "https://mmg.whatsapp.net/mms/image/encrypted"}}
+
+    invalid_references = [
+      "/mms/image/not-enough-data",
+      %{kind: :image, direct_path: "/mms/image/encrypted", media_key: "short"},
+      %{kind: :image, media_key: media_key},
+      %{kind: :image, url: "http://mmg.whatsapp.net/media", media_key: media_key},
+      %{kind: :image, url: "https://example.com/media", media_key: media_key},
+      %{
+        kind: :image,
+        direct_path: "/mms/image/encrypted",
+        media_key: media_key,
+        file_enc_sha256: "short"
+      }
+    ]
+
+    for reference <- invalid_references do
+      assert {:error, :invalid_media_reference} =
+               Adapter.fetch_media(reference, transport: MockTransport)
+    end
   end
 
   test "transform_incoming/1 handles wrapped and unsupported payloads" do
