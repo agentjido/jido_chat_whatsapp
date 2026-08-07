@@ -20,6 +20,9 @@ defmodule Jido.Chat.WhatsApp.Transport do
               opts :: keyword()
             ) :: send_result()
 
+  @callback download_media(Amarula.Content.Media.t()) ::
+              {:ok, binary()} | {:error, term()}
+
   @callback send_reaction(conn(), message_ref :: {String.t(), String.t()}, emoji :: String.t()) ::
               send_result()
 

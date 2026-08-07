@@ -33,6 +33,12 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     end
 
     @impl true
+    def download_media(media) do
+      send(self(), {:download_media, media})
+      {:ok, "whatsapp media bytes"}
+    end
+
+    @impl true
     def send_reaction(conn, message_ref, emoji) do
       send(self(), {:send_reaction, conn, message_ref, emoji})
       {:ok, "wamid.reaction"}
@@ -69,6 +75,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert Adapter.channel_type() == :whatsapp
     assert caps.send_message == :native
     assert caps.send_file == :native
+    assert caps.fetch_media == :native
     assert caps.parse_event == :native
     assert caps.fetch_messages == :unsupported
 
@@ -99,6 +106,9 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
   end
 
   test "transform_incoming/1 normalizes media payloads" do
+    media_key = String.duplicate("k", 32)
+    encrypted_hash = String.duplicate("h", 32)
+
     payload = %{
       "id" => "msg-2",
       "channel_jid" => "120363000000000000@g.us",
@@ -109,6 +119,9 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
         "mimetype" => "image/jpeg",
         "caption" => "look",
         "file_length" => 123,
+        "direct_path" => "/mms/image/encrypted",
+        "media_key" => media_key,
+        "file_enc_sha256" => encrypted_hash,
         "width" => 640,
         "height" => 480
       }
@@ -117,7 +130,100 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert {:ok, incoming} = Adapter.transform_incoming(payload)
     assert incoming.chat_type == :group
     assert incoming.text == "look"
-    assert [%{kind: :image, media_type: "image/jpeg", size_bytes: 123}] = incoming.media
+    assert [%{kind: :image, media_type: "image/jpeg", size_bytes: 123} = media] = incoming.media
+
+    assert {:ok, "whatsapp media bytes"} =
+             Adapter.fetch_media(media, transport: MockTransport)
+
+    assert_received {:download_media,
+                     %Amarula.Content.Media{
+                       kind: :image,
+                       mimetype: "image/jpeg",
+                       direct_path: "/mms/image/encrypted",
+                       media_key: ^media_key,
+                       file_enc_sha256: ^encrypted_hash
+                     }}
+  end
+
+  test "fetch_media/2 accepts valid descriptor maps" do
+    media_key = String.duplicate("d", 32)
+    encrypted_hash = String.duplicate("e", 32)
+
+    reference = %{
+      "kind" => "document",
+      "direct_path" => "/mms/document/encrypted",
+      "media_key" => media_key,
+      "file_enc_sha256" => encrypted_hash,
+      "file_name" => "report.pdf"
+    }
+
+    assert {:ok, "whatsapp media bytes"} =
+             Adapter.fetch_media(reference, transport: MockTransport)
+
+    assert_received {:download_media,
+                     %Amarula.Content.Media{
+                       kind: :document,
+                       direct_path: "/mms/document/encrypted",
+                       media_key: ^media_key,
+                       file_enc_sha256: ^encrypted_hash,
+                       file_name: "report.pdf"
+                     }}
+  end
+
+  test "fetch_media/2 prefers provider metadata and validates references" do
+    media_key = String.duplicate("m", 32)
+
+    media =
+      Jido.Chat.Media.new(%{
+        kind: :file,
+        url: "https://example.com/untrusted",
+        metadata: %{
+          "kind" => "sticker",
+          "direct_path" => "/mms/image/sticker",
+          "media_key" => media_key
+        }
+      })
+
+    assert {:ok, "whatsapp media bytes"} =
+             Adapter.fetch_media(media, transport: MockTransport)
+
+    assert_received {:download_media,
+                     %Amarula.Content.Media{
+                       kind: :sticker,
+                       direct_path: "/mms/image/sticker",
+                       media_key: ^media_key,
+                       url: nil
+                     }}
+
+    valid_url_reference = %{
+      kind: :image,
+      url: "https://mmg.whatsapp.net/mms/image/encrypted",
+      media_key: media_key
+    }
+
+    assert {:ok, "whatsapp media bytes"} =
+             Adapter.fetch_media(valid_url_reference, transport: MockTransport)
+
+    assert_received {:download_media, %Amarula.Content.Media{url: "https://mmg.whatsapp.net/mms/image/encrypted"}}
+
+    invalid_references = [
+      "/mms/image/not-enough-data",
+      %{kind: :image, direct_path: "/mms/image/encrypted", media_key: "short"},
+      %{kind: :image, media_key: media_key},
+      %{kind: :image, url: "http://mmg.whatsapp.net/media", media_key: media_key},
+      %{kind: :image, url: "https://example.com/media", media_key: media_key},
+      %{
+        kind: :image,
+        direct_path: "/mms/image/encrypted",
+        media_key: media_key,
+        file_enc_sha256: "short"
+      }
+    ]
+
+    for reference <- invalid_references do
+      assert {:error, :invalid_media_reference} =
+               Adapter.fetch_media(reference, transport: MockTransport)
+    end
   end
 
   test "transform_incoming/1 handles wrapped and unsupported payloads" do

@@ -11,6 +11,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     EventEnvelope,
     FileUpload,
     Incoming,
+    Media,
     Response,
     WebhookRequest,
     WebhookResponse
@@ -36,6 +37,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       fetch_metadata: :native,
       fetch_thread: :fallback,
       fetch_message: :unsupported,
+      fetch_media: :native,
       add_reaction: :native,
       remove_reaction: :native,
       post_ephemeral: :unsupported,
@@ -131,6 +133,22 @@ defmodule Jido.Chat.WhatsApp.Adapter do
          raw: %{id: msg_id, jid: jid, media_type: media_type},
          metadata: %{filename: upload.filename, media_type: upload.media_type}
        })}
+    end
+  end
+
+  @doc """
+  Fetches and decrypts the bytes behind an inbound WhatsApp media reference.
+
+  WhatsApp media needs the CDN path, media key, and encrypted-file hash. These
+  values are kept in the normalized media metadata and passed to Amarula. A
+  reference must contain a 32-byte media key and either a direct CDN path or an
+  HTTPS URL on a WhatsApp host.
+  """
+  @impl true
+  def fetch_media(reference, opts \\ []) when is_list(opts) do
+    with {:ok, media} <- amarula_media(reference) do
+      transport = Keyword.get(opts, :transport, AmarulaClient)
+      transport.download_media(media)
     end
   end
 
@@ -358,6 +376,96 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   defp upload_caption(%FileUpload{} = upload, %SendOptions{} = opts) do
     opts.caption || upload.metadata[:caption] || upload.metadata["caption"]
   end
+
+  defp amarula_media(%Amarula.Content.Media{} = media), do: validate_amarula_media(media)
+
+  defp amarula_media(%Media{} = media) do
+    build_amarula_media(Map.from_struct(media), media.metadata)
+  end
+
+  defp amarula_media(%{} = reference) do
+    metadata = map_get(reference, [:metadata, "metadata"])
+    build_amarula_media(reference, if(is_map(metadata), do: metadata, else: %{}))
+  end
+
+  defp amarula_media(_reference), do: {:error, :invalid_media_reference}
+
+  defp build_amarula_media(reference, metadata) do
+    with {:ok, kind} <-
+           amarula_media_kind(media_value(reference, metadata, [:kind, "kind", :type, "type"])) do
+      media =
+        struct(Amarula.Content.Media,
+          kind: kind,
+          mimetype: media_value(reference, metadata, [:mimetype, "mimetype", :media_type, "media_type"]),
+          caption: media_value(reference, metadata, [:caption, "caption"]),
+          file_length: media_value(reference, metadata, [:file_length, "file_length", :size_bytes, "size_bytes"]),
+          width: media_value(reference, metadata, [:width, "width"]),
+          height: media_value(reference, metadata, [:height, "height"]),
+          seconds: media_value(reference, metadata, [:seconds, "seconds", :duration, "duration"]),
+          file_name: media_value(reference, metadata, [:file_name, "file_name", :filename, "filename"]),
+          url: media_value(reference, metadata, [:url, "url"]),
+          direct_path: media_value(reference, metadata, [:direct_path, "direct_path"]),
+          media_key: media_value(reference, metadata, [:media_key, "media_key"]),
+          file_sha256: media_value(reference, metadata, [:file_sha256, "file_sha256"]),
+          file_enc_sha256: media_value(reference, metadata, [:file_enc_sha256, "file_enc_sha256"])
+        )
+
+      validate_amarula_media(media)
+    end
+  end
+
+  defp media_value(reference, metadata, keys), do: map_get(metadata, keys) || map_get(reference, keys)
+
+  defp validate_amarula_media(%Amarula.Content.Media{} = media) do
+    media = sanitize_media_locator(media)
+
+    if valid_media_kind?(media.kind) and valid_media_key?(media.media_key) and
+         valid_media_locator?(media) and valid_media_hash?(media.file_sha256) and
+         valid_media_hash?(media.file_enc_sha256) do
+      {:ok, media}
+    else
+      {:error, :invalid_media_reference}
+    end
+  end
+
+  defp sanitize_media_locator(%Amarula.Content.Media{direct_path: path} = media) do
+    if valid_direct_path?(path), do: %{media | url: nil}, else: media
+  end
+
+  defp valid_media_kind?(kind), do: kind in [:image, :video, :audio, :document, :sticker]
+  defp valid_media_key?(key), do: is_binary(key) and byte_size(key) == 32
+
+  defp valid_media_locator?(media) do
+    valid_direct_path?(media.direct_path) or valid_media_url?(media.url)
+  end
+
+  defp valid_direct_path?(path), do: is_binary(path) and path != "" and String.starts_with?(path, "/")
+
+  defp valid_media_url?(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: "https", host: host} when is_binary(host) ->
+        host = String.downcase(host)
+        host == "whatsapp.net" or String.ends_with?(host, ".whatsapp.net")
+
+      _other ->
+        false
+    end
+  end
+
+  defp valid_media_url?(_url), do: false
+
+  defp valid_media_hash?(nil), do: true
+  defp valid_media_hash?(hash), do: is_binary(hash) and byte_size(hash) == 32
+
+  defp amarula_media_kind(kind) when kind in [:image, :video, :audio, :document, :sticker], do: {:ok, kind}
+  defp amarula_media_kind(:file), do: {:ok, :document}
+  defp amarula_media_kind("image"), do: {:ok, :image}
+  defp amarula_media_kind("video"), do: {:ok, :video}
+  defp amarula_media_kind("audio"), do: {:ok, :audio}
+  defp amarula_media_kind("document"), do: {:ok, :document}
+  defp amarula_media_kind("sticker"), do: {:ok, :sticker}
+  defp amarula_media_kind("file"), do: {:ok, :document}
+  defp amarula_media_kind(_kind), do: {:error, :invalid_media_reference}
 
   defp whatsapp_media_type(:image), do: :image
   defp whatsapp_media_type(:video), do: :video
