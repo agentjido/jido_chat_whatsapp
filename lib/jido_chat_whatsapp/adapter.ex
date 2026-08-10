@@ -158,7 +158,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     jid = to_jid(jid)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
-         {:ok, msg_id} <- transport(opts).send_edit(conn, {jid, to_string(message_id)}, text) do
+         {:ok, msg_id} <- transport(opts).send_edit(conn, {jid, to_string(message_id), true}, text) do
       {:ok,
        Response.new(%{
          external_message_id: msg_id,
@@ -175,7 +175,8 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     opts = SendOptions.new(opts)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
-         {:ok, _msg_id} <- transport(opts).send_revoke(conn, {to_jid(jid), to_string(message_id)}) do
+         {:ok, _msg_id} <-
+           transport(opts).send_revoke(conn, {to_jid(jid), to_string(message_id), true}) do
       :ok
     end
   end
@@ -214,7 +215,12 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     opts = SendOptions.new(opts)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
-         {:ok, _msg_id} <- transport(opts).send_reaction(conn, {to_jid(jid), to_string(message_id)}, emoji) do
+         {:ok, _msg_id} <-
+           transport(opts).send_reaction(
+             conn,
+             {to_jid(jid), to_string(message_id), false},
+             emoji
+           ) do
       :ok
     end
   end
@@ -224,7 +230,12 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     opts = SendOptions.new(opts)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
-         {:ok, _msg_id} <- transport(opts).send_reaction(conn, {to_jid(jid), to_string(message_id)}, "") do
+         {:ok, _msg_id} <-
+           transport(opts).send_reaction(
+             conn,
+             {to_jid(jid), to_string(message_id), false},
+             ""
+           ) do
       :ok
     end
   end
