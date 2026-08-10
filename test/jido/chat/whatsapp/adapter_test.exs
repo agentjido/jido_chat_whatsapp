@@ -419,7 +419,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
              )
 
     assert edited.status == :edited
-    assert_receive {:send_edit, _, {"15551234567@s.whatsapp.net", "msg-1"}, "fixed"}
+    assert_receive {:send_edit, _, {"15551234567@s.whatsapp.net", "msg-1", true}, "fixed"}
 
     assert :ok =
              Adapter.delete_message("15551234567@s.whatsapp.net", "msg-1",
@@ -427,7 +427,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
                transport: MockTransport
              )
 
-    assert_receive {:send_revoke, _, {"15551234567@s.whatsapp.net", "msg-1"}}
+    assert_receive {:send_revoke, _, {"15551234567@s.whatsapp.net", "msg-1", true}}
 
     assert :ok =
              Adapter.add_reaction("15551234567@s.whatsapp.net", "msg-1", "ok",
@@ -435,7 +435,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
                transport: MockTransport
              )
 
-    assert_receive {:send_reaction, _, {"15551234567@s.whatsapp.net", "msg-1"}, "ok"}
+    assert_receive {:send_reaction, _, {"15551234567@s.whatsapp.net", "msg-1", false}, "ok"}
 
     assert :ok =
              Adapter.remove_reaction("15551234567@s.whatsapp.net", "msg-1", "ok",
@@ -443,7 +443,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
                transport: MockTransport
              )
 
-    assert_receive {:send_reaction, _, {"15551234567@s.whatsapp.net", "msg-1"}, ""}
+    assert_receive {:send_reaction, _, {"15551234567@s.whatsapp.net", "msg-1", false}, ""}
 
     assert :ok =
              Adapter.start_typing("15551234567@s.whatsapp.net",

@@ -39,14 +39,29 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
     assert is_binary(text_id)
 
     assert {:ok, reaction_id} =
-             AmarulaClient.send_reaction(conn, {"15551234567@s.whatsapp.net", "target-1"}, "ok")
+             AmarulaClient.send_reaction(
+               conn,
+               {"15551234567@s.whatsapp.net", "target-1", false},
+               "ok"
+             )
 
     assert is_binary(reaction_id)
 
-    assert {:ok, edit_id} = AmarulaClient.send_edit(conn, {"15551234567@s.whatsapp.net", "target-1"}, "fixed")
+    assert {:ok, edit_id} =
+             AmarulaClient.send_edit(
+               conn,
+               {"15551234567@s.whatsapp.net", "target-1", true},
+               "fixed"
+             )
+
     assert is_binary(edit_id)
 
-    assert {:ok, revoke_id} = AmarulaClient.send_revoke(conn, {"15551234567@s.whatsapp.net", "target-1"})
+    assert {:ok, revoke_id} =
+             AmarulaClient.send_revoke(
+               conn,
+               {"15551234567@s.whatsapp.net", "target-1", true}
+             )
+
     assert is_binary(revoke_id)
 
     assert :ok = AmarulaClient.send_chatstate(conn, "15551234567@s.whatsapp.net", :paused)

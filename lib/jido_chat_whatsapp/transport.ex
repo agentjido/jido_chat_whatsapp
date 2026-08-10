@@ -5,6 +5,7 @@ defmodule Jido.Chat.WhatsApp.Transport do
 
   @type conn :: GenServer.server()
   @type send_result :: {:ok, String.t()} | {:error, term()}
+  @type message_ref :: {String.t(), String.t(), boolean()}
 
   @callback connect(config :: map(), opts :: keyword()) :: {:ok, conn()} | {:error, term()}
   @callback resolve_conn(opts :: keyword()) :: {:ok, conn()} | {:error, term()}
@@ -23,13 +24,13 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @callback download_media(Amarula.Content.Media.t()) ::
               {:ok, binary()} | {:error, term()}
 
-  @callback send_reaction(conn(), message_ref :: {String.t(), String.t()}, emoji :: String.t()) ::
+  @callback send_reaction(conn(), message_ref(), emoji :: String.t()) ::
               send_result()
 
-  @callback send_edit(conn(), message_ref :: {String.t(), String.t()}, text :: String.t()) ::
+  @callback send_edit(conn(), message_ref(), text :: String.t()) ::
               send_result()
 
-  @callback send_revoke(conn(), message_ref :: {String.t(), String.t()}) :: send_result()
+  @callback send_revoke(conn(), message_ref()) :: send_result()
 
   @callback send_chatstate(
               conn(),
