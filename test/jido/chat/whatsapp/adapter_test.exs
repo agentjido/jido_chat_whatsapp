@@ -176,9 +176,10 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
 
     reference = %{
       kind: :image,
-      mimetype: " ",
+      media_type: "image/png",
       direct_path: "/mms/image/encrypted",
-      media_key: media_key
+      media_key: media_key,
+      metadata: %{mimetype: " "}
     }
 
     assert {:ok, "whatsapp media bytes"} =
@@ -187,7 +188,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert_received {:download_media,
                      %Amarula.Content.Media{
                        kind: :image,
-                       mimetype: nil,
+                       mimetype: "image/png",
                        direct_path: "/mms/image/encrypted"
                      }}
   end

@@ -20,6 +20,8 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   alias Jido.Chat.WhatsApp.{ConnectionWorker, Message, SendOptions}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
+  @media_type_pattern ~r/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/
+
   @impl true
   def channel_type, do: :whatsapp
 
@@ -407,10 +409,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       media =
         struct(Amarula.Content.Media,
           kind: kind,
-          mimetype:
-            reference
-            |> media_value(metadata, [:mimetype, "mimetype", :media_type, "media_type"])
-            |> non_empty_string(),
+          mimetype: media_type_value(reference, metadata),
           caption: media_value(reference, metadata, [:caption, "caption"]),
           file_length: media_value(reference, metadata, [:file_length, "file_length", :size_bytes, "size_bytes"]),
           width: media_value(reference, metadata, [:width, "width"]),
@@ -429,6 +428,11 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   end
 
   defp media_value(reference, metadata, keys), do: map_get(metadata, keys) || map_get(reference, keys)
+
+  defp media_type_value(reference, metadata) do
+    keys = [:mimetype, "mimetype", :media_type, "media_type"]
+    normalize_media_type(map_get(metadata, keys)) || normalize_media_type(map_get(reference, keys))
+  end
 
   defp validate_amarula_media(%Amarula.Content.Media{} = media) do
     media = sanitize_media_locator(media)
@@ -471,14 +475,23 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   defp valid_media_hash?(nil), do: true
   defp valid_media_hash?(hash), do: is_binary(hash) and byte_size(hash) == 32
 
-  defp non_empty_string(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      trimmed -> trimmed
-    end
+  defp normalize_media_type(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    if Regex.match?(@media_type_pattern, canonical_media_type(trimmed)),
+      do: trimmed,
+      else: nil
   end
 
-  defp non_empty_string(_value), do: nil
+  defp normalize_media_type(_value), do: nil
+
+  defp canonical_media_type(value) do
+    value
+    |> String.split(";", parts: 2)
+    |> hd()
+    |> String.trim()
+    |> String.downcase()
+  end
 
   defp amarula_media_kind(kind) when kind in [:image, :video, :audio, :document, :sticker], do: {:ok, kind}
   defp amarula_media_kind(:file), do: {:ok, :document}

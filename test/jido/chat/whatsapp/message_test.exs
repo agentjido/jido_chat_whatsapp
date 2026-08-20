@@ -132,7 +132,7 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
                type: :media,
                content: %{
                  kind: :image,
-                 mimetype: " ",
+                 mimetype: "not-a-mime",
                  file_name: "photo.png"
                }
              })
