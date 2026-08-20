@@ -123,6 +123,21 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
 
     assert [%{kind: :file, filename: "guide.pdf", media_type: "application/pdf", size_bytes: 200, duration: 7}] =
              attrs.media
+
+    assert {:ok, attrs} =
+             Message.incoming_attrs(%{
+               id: "media-3",
+               channel_jid: "15551234567@s.whatsapp.net",
+               from_jid: "15557654321@s.whatsapp.net",
+               type: :media,
+               content: %{
+                 kind: :image,
+                 mimetype: " ",
+                 file_name: "photo.png"
+               }
+             })
+
+    assert [%{kind: :image, filename: "photo.png", media_type: nil}] = attrs.media
   end
 
   test "reaction_event/1 supports map and tuple keys" do

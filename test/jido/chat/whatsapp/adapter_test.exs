@@ -163,10 +163,32 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert_received {:download_media,
                      %Amarula.Content.Media{
                        kind: :document,
+                       mimetype: nil,
                        direct_path: "/mms/document/encrypted",
                        media_key: ^media_key,
                        file_enc_sha256: ^encrypted_hash,
                        file_name: "report.pdf"
+                     }}
+  end
+
+  test "fetch_media/2 normalizes blank MIME metadata without changing download behavior" do
+    media_key = String.duplicate("b", 32)
+
+    reference = %{
+      kind: :image,
+      mimetype: " ",
+      direct_path: "/mms/image/encrypted",
+      media_key: media_key
+    }
+
+    assert {:ok, "whatsapp media bytes"} =
+             Adapter.fetch_media(reference, transport: MockTransport)
+
+    assert_received {:download_media,
+                     %Amarula.Content.Media{
+                       kind: :image,
+                       mimetype: nil,
+                       direct_path: "/mms/image/encrypted"
                      }}
   end
 

@@ -407,7 +407,10 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       media =
         struct(Amarula.Content.Media,
           kind: kind,
-          mimetype: media_value(reference, metadata, [:mimetype, "mimetype", :media_type, "media_type"]),
+          mimetype:
+            reference
+            |> media_value(metadata, [:mimetype, "mimetype", :media_type, "media_type"])
+            |> non_empty_string(),
           caption: media_value(reference, metadata, [:caption, "caption"]),
           file_length: media_value(reference, metadata, [:file_length, "file_length", :size_bytes, "size_bytes"]),
           width: media_value(reference, metadata, [:width, "width"]),
@@ -467,6 +470,15 @@ defmodule Jido.Chat.WhatsApp.Adapter do
 
   defp valid_media_hash?(nil), do: true
   defp valid_media_hash?(hash), do: is_binary(hash) and byte_size(hash) == 32
+
+  defp non_empty_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp non_empty_string(_value), do: nil
 
   defp amarula_media_kind(kind) when kind in [:image, :video, :audio, :document, :sticker], do: {:ok, kind}
   defp amarula_media_kind(:file), do: {:ok, :document}
