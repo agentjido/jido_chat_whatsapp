@@ -5,6 +5,8 @@ defmodule Jido.Chat.WhatsApp.Message do
 
   alias Jido.Chat.ReactionEvent
 
+  @media_type_pattern ~r/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/
+
   @doc "Converts an Amarula message into a plain payload map suitable for listener ingress."
   @spec to_payload(Amarula.Msg.t(), map()) :: map()
   def to_payload(%Amarula.Msg{} = msg, metadata \\ %{}) when is_map(metadata) do
@@ -193,7 +195,10 @@ defmodule Jido.Chat.WhatsApp.Message do
     [
       %{
         kind: content |> map_get([:kind, "kind"]) |> media_kind(),
-        media_type: map_get(content, [:mimetype, "mimetype", :media_type, "media_type"]),
+        media_type:
+          content
+          |> map_get([:mimetype, "mimetype", :media_type, "media_type"])
+          |> normalize_media_type(),
         filename: map_get(content, [:file_name, "file_name", :filename, "filename"]),
         size_bytes: map_get(content, [:file_length, "file_length", :size_bytes, "size_bytes"]),
         width: map_get(content, [:width, "width"]),
@@ -213,6 +218,24 @@ defmodule Jido.Chat.WhatsApp.Message do
   defp media_kind(kind) when kind in [:image, :audio, :video, :file], do: kind
   defp media_kind(kind) when kind in ["image", "audio", "video", "file"], do: String.to_atom(kind)
   defp media_kind(_), do: :file
+
+  defp normalize_media_type(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    if Regex.match?(@media_type_pattern, canonical_media_type(trimmed)),
+      do: trimmed,
+      else: nil
+  end
+
+  defp normalize_media_type(_value), do: nil
+
+  defp canonical_media_type(value) do
+    value
+    |> String.split(";", parts: 2)
+    |> hd()
+    |> String.trim()
+    |> String.downcase()
+  end
 
   defp quoted_id(nil), do: nil
   defp quoted_id(quoted) when is_map(quoted), do: map_get(quoted, [:id, "id"])
