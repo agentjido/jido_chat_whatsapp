@@ -83,6 +83,11 @@ On first pairing Amarula emits QR and pairing lifecycle updates. The worker
 forwards those as non-message action events. Chat messages from
 `:messages_upsert` are normalized into `Jido.Chat.Incoming`.
 
+Linked-device events are local Amarula process messages. They are not HTTP
+webhooks. `verify_webhook/2` is a compatibility no-op and is not an
+authentication check. Do not expose it as the security check for a public HTTP
+endpoint. See the [preview validation and security runbook](docs/preview_validation.md).
+
 ## Config
 
 You can pass a profile per call:
@@ -111,22 +116,29 @@ Bridge listener settings can include:
 
 ## Pairing
 
-Amarula ships a pairing task that can create the profile consumed by this adapter:
+This adapter ships a QR-only pairing task that creates the Amarula profile:
 
 ```bash
 export AMARULA_DATA_DIR="$PWD/amarula_data"
 
-mix amarula.pair agent_primary
-mix amarula.pair agent_primary --phone 15551234567
+mix jido_chat_whatsapp.pair agent_primary
 ```
+
+Phone-code pairing is disabled in this task. Amarula 0.5.7 logs the raw phone
+pairing code. Keep the task QR-only until an Amarula release provides verified
+safe redaction.
 
 Use the same profile name with `config :jido_chat_whatsapp, :profile` or with
 per-call/listener `:profile` options.
 
+Use the [preview validation runbook](docs/preview_validation.md) to check QR
+pairing, stored-session reconnect, bounded `401` handling, and the live release
+gates. Keep QR text and Amarula profile storage out of Git and logs.
+
 The linked device will usually appear in WhatsApp as `Google Chrome (macOS)`.
 That is expected: Amarula connects through the WhatsApp Web linked-device
 protocol and presents a browser identity by default. QR pairing and phone-code
-pairing both create the same kind of linked device.
+pairing are linked-device operations, but this task permits QR pairing only.
 
 ## Live Integration Test
 
@@ -191,8 +203,13 @@ Current live coverage:
 - optional manual receive normalization when `WHATSAPP_WAIT_FOR_REPLY=true`
 - unsupported-core contract checks
 
+Current local preview coverage also includes a deterministic receive, normalize,
+and quoted-reply chain through local fake transports. It does not start
+`jido_messaging` and does not make a live-account claim.
+
 Planned live coverage:
 
 - QR pairing lifecycle
 - receive-to-reply loop through `jido_messaging`
+- execution of the stored-session and bounded `401` release gates
 - image/video/audio-specific media sends
