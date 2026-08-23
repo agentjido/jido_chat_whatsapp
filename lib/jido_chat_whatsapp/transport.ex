@@ -7,7 +7,11 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @type send_result :: {:ok, String.t()} | {:error, term()}
   @type message_ref :: {String.t(), String.t(), boolean()}
 
+  @callback ensure_started(opts :: keyword()) :: :ok | {:error, term()}
   @callback connect(config :: map(), opts :: keyword()) :: {:ok, conn()} | {:error, term()}
+  @callback stop(conn(), opts :: keyword()) :: :ok | {:error, term()}
+  @callback render_qr(qr :: String.t(), opts :: keyword()) ::
+              {:ok, String.t()} | {:error, term()}
   @callback resolve_conn(opts :: keyword()) :: {:ok, conn()} | {:error, term()}
 
   @callback send_text(conn(), jid :: String.t(), text :: String.t(), opts :: keyword()) ::
@@ -40,4 +44,6 @@ defmodule Jido.Chat.WhatsApp.Transport do
 
   @callback request_pairing_code(conn(), phone :: String.t(), opts :: keyword()) ::
               {:ok, String.t()} | {:error, term()}
+
+  @optional_callbacks ensure_started: 1, stop: 2, render_qr: 2
 end

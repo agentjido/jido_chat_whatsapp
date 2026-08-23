@@ -547,7 +547,8 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
                ingress: %{
                  mode: "amarula",
                  storage_root: "/tmp/amarula",
-                 connect_opts: [name: :wa_conn]
+                 connect_opts: [name: :wa_conn],
+                 amarula: %{max_retries: 0, retry_delay: 1_000}
                },
                sink_mfa: {__MODULE__, :emit, [self()]}
              )
@@ -555,6 +556,8 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     worker_opts = amarula_spec.start |> elem(2) |> hd()
     assert worker_opts[:config].profile == "settings_profile"
     assert worker_opts[:config].storage == {Amarula.Storage.File, root: "/tmp/amarula"}
+    assert worker_opts[:config].max_retries == 0
+    assert worker_opts[:config].retry_delay == 1_000
     assert worker_opts[:connect_opts] == [name: :wa_conn]
   end
 

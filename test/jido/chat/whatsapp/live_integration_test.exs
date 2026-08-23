@@ -5,6 +5,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   alias Jido.Chat.FileUpload
   alias Jido.Chat.PostPayload
   alias Jido.Chat.WhatsApp.Adapter
+  alias Jido.Chat.WhatsApp.LiveValidation
   alias Jido.Chat.WhatsApp.Message
 
   @truthy ["1", "true", "TRUE", "yes", "on"]
@@ -14,6 +15,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   @phone System.get_env("WHATSAPP_TEST_PHONE")
   @reaction System.get_env("WHATSAPP_TEST_REACTION") || "\u{1F44D}"
   @wait_for_reply System.get_env("WHATSAPP_WAIT_FOR_REPLY") in @truthy
+  @run_rejected_session System.get_env("RUN_LIVE_WHATSAPP_401_TEST") in @truthy
 
   @moduletag :live
   @moduletag :whatsapp_live
@@ -28,16 +30,17 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
 
   setup_all do
     if @run_live and @profile not in [nil, ""] and @jid not in [nil, ""] do
+      reconnect_budget = LiveValidation.new_reconnect_budget()
       {:ok, conn, started?} = start_connection!(@profile)
-      :ok = ensure_open!(conn, @profile)
+      :ok = ensure_open!(conn, @profile, reconnect_budget)
 
       on_exit(fn ->
         if started?, do: Amarula.stop(@profile)
       end)
 
-      {:ok, conn: conn, profile: @profile, jid: @jid}
+      {:ok, conn: conn, profile: @profile, jid: @jid, reconnect_budget: reconnect_budget}
     else
-      {:ok, conn: nil, profile: @profile, jid: @jid}
+      {:ok, conn: nil, profile: @profile, jid: @jid, reconnect_budget: nil}
     end
   end
 
@@ -45,7 +48,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     if ctx.conn do
       :ok = Amarula.set_parent(ctx.conn, self())
       drain_amarula_events()
-      :ok = ensure_open!(ctx.conn, ctx.profile)
+      :ok = ensure_open!(ctx.conn, ctx.profile, ctx.reconnect_budget)
     end
 
     {:ok, opts: [profile: ctx.profile]}
@@ -54,6 +57,16 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   @tag :whatsapp_live_connectivity
   test "linked device connection stays open", ctx do
     assert Amarula.connection_state(ctx.conn) == :connected
+  end
+
+  if not @run_rejected_session do
+    @tag skip: "set RUN_LIVE_WHATSAPP_401_TEST=true to run the rejected-session gate"
+  end
+
+  @tag :whatsapp_live_rejected_session
+  @tag :whatsapp_live_session_destructive
+  test "a rejected disposable session closes once without reconnecting", _ctx do
+    assert :ok = assert_rejected_session!(rejected_session_timeout_ms(), no_reconnect_observation_ms())
   end
 
   @tag :whatsapp_live_outbound
@@ -400,9 +413,9 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     end
   end
 
-  defp ensure_open!(nil, _profile), do: :ok
+  defp ensure_open!(nil, _profile, _budget), do: :ok
 
-  defp ensure_open!(conn, profile) do
+  defp ensure_open!(conn, profile, reconnect_budget) do
     case Amarula.connection_state(conn) do
       :connected ->
         :ok
@@ -411,8 +424,11 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
         assert_open!(profile, open_timeout_ms())
 
       _other ->
-        :ok = Amarula.reconnect(conn)
-        assert_open!(profile, open_timeout_ms())
+        case LiveValidation.reconnect_once(reconnect_budget, fn -> Amarula.reconnect(conn) end) do
+          {:ok, :ok} -> assert_open!(profile, open_timeout_ms())
+          {:ok, other} -> flunk("explicit reconnect failed: #{inspect(other)}")
+          {:error, :reconnect_budget_exhausted} -> flunk("suite-wide explicit reconnect budget was exhausted")
+        end
     end
   end
 
@@ -437,8 +453,92 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
         {:halt, :ok}
 
       event, events ->
-        {:cont, [summarize_event(event) | events]}
+        {:cont, [LiveValidation.summarize_event(event) | events]}
     end)
+  end
+
+  defp assert_rejected_session!(timeout_ms, observation_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    with {:ok, events} <- wait_for_401(deadline, []),
+         {:ok, events} <- wait_for_closed(deadline, events),
+         :ok <- assert_no_reconnect(observation_ms, events) do
+      :ok
+    else
+      {:error, reason, events} ->
+        flunk("""
+        The rejected-session gate failed: #{inspect(reason)}.
+        Redacted events:
+
+        #{inspect(Enum.reverse(Enum.take(events, 12)), pretty: true)}
+        """)
+    end
+  end
+
+  defp wait_for_401(deadline, events) do
+    receive_before(deadline, events, fn
+      {:amarula, :error, {:stream_error, 401, _reason}} = event, events ->
+        {:halt, {:ok, [LiveValidation.summarize_event(event) | events]}}
+
+      event, events ->
+        {:cont, [LiveValidation.summarize_event(event) | events]}
+    end)
+  end
+
+  defp wait_for_closed(deadline, events) do
+    receive_before(deadline, events, fn
+      {:amarula, :connection_update, %{connection: :closed}} = event, events ->
+        {:halt, {:ok, [LiveValidation.summarize_event(event) | events]}}
+
+      {:amarula, :connection_update, %{connection: :connecting}} = event, events ->
+        {:halt, {:error, :reconnected_after_401, [LiveValidation.summarize_event(event) | events]}}
+
+      {:amarula, :error, {:stream_error, 401, _reason}} = event, events ->
+        {:halt, {:error, :duplicate_401, [LiveValidation.summarize_event(event) | events]}}
+
+      event, events ->
+        {:cont, [LiveValidation.summarize_event(event) | events]}
+    end)
+  end
+
+  defp assert_no_reconnect(observation_ms, events) do
+    deadline = System.monotonic_time(:millisecond) + observation_ms
+
+    receive_before(deadline, events, fn
+      {:amarula, :connection_update, %{connection: :connecting}} = event, events ->
+        {:halt, {:error, :reconnected_after_close, [LiveValidation.summarize_event(event) | events]}}
+
+      {:amarula, :error, {:stream_error, 401, _reason}} = event, events ->
+        {:halt, {:error, :duplicate_401, [LiveValidation.summarize_event(event) | events]}}
+
+      {:amarula, :connection_update, %{connection: :closed}} = event, events ->
+        {:halt, {:error, :duplicate_closed, [LiveValidation.summarize_event(event) | events]}}
+
+      event, events ->
+        {:cont, [LiveValidation.summarize_event(event) | events]}
+    end)
+    |> case do
+      {:error, :timeout, _events} -> :ok
+      result -> result
+    end
+  end
+
+  defp receive_before(deadline, events, reducer) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :timeout, events}
+    else
+      receive do
+        event ->
+          case reducer.(event, events) do
+            {:halt, result} -> result
+            {:cont, events} -> receive_before(deadline, events, reducer)
+          end
+      after
+        min(remaining, 1_000) -> receive_before(deadline, events, reducer)
+      end
+    end
   end
 
   defp receive_incoming_reply(expected_jid, timeout_ms) do
@@ -450,7 +550,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
         end
 
       event, events ->
-        {:cont, [summarize_event(event) | events]}
+        {:cont, [LiveValidation.summarize_event(event) | events]}
     end)
   end
 
@@ -495,17 +595,13 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     end
   end
 
-  defp summarize_event({:amarula, event, data}), do: {event, summarize_data(data)}
-  defp summarize_event(event), do: event
-
-  defp summarize_data(%{connection: _connection} = data), do: Map.take(data, [:connection, :qr])
-  defp summarize_data(%{message_ids: message_ids, status: status}), do: %{message_ids: message_ids, status: status}
-  defp summarize_data(%{messages: messages}) when is_list(messages), do: %{messages: length(messages)}
-  defp summarize_data(data) when is_map(data), do: %{keys: Map.keys(data)}
-  defp summarize_data(reason) when is_atom(reason) or is_binary(reason), do: reason
-  defp summarize_data(reason), do: inspect(reason)
-
   defp open_timeout_ms, do: env_integer("WHATSAPP_OPEN_TIMEOUT_MS", 30_000)
+  defp rejected_session_timeout_ms, do: env_integer("WHATSAPP_401_TIMEOUT_MS", 180_000)
+
+  defp no_reconnect_observation_ms do
+    LiveValidation.no_reconnect_observation_ms(env_integer("WHATSAPP_401_OBSERVATION_MS", 30_000))
+  end
+
   defp reply_timeout_ms, do: env_integer("WHATSAPP_REPLY_TIMEOUT_MS", 180_000)
   defp live_send_delay_ms, do: env_integer("WHATSAPP_LIVE_SEND_DELAY_MS", 60_000)
   defp live_send_jitter_ms, do: env_integer("WHATSAPP_LIVE_SEND_JITTER_MS", 0)

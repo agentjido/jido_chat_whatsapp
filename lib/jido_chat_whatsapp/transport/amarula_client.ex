@@ -7,12 +7,28 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
 
   require Logger
 
+  alias Amarula.Protocol.Auth.QRCodeGenerator
+
+  @impl true
+  def ensure_started(_opts) do
+    case Process.whereis(Amarula.Supervisor) do
+      nil -> start_supervisor()
+      _pid -> :ok
+    end
+  end
+
   @impl true
   def connect(config, opts) when is_map(config) and is_list(opts) do
     config
     |> Amarula.new()
     |> Amarula.connect(opts)
   end
+
+  @impl true
+  def stop(conn, _opts), do: Amarula.stop(conn)
+
+  @impl true
+  def render_qr(qr, _opts) when is_binary(qr), do: QRCodeGenerator.render_terminal(qr)
 
   @impl true
   def resolve_conn(opts) when is_list(opts) do
@@ -84,6 +100,14 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
 
   @impl true
   def request_pairing_code(conn, phone, opts), do: Amarula.request_pairing_code(conn, phone, opts)
+
+  defp start_supervisor do
+    case Amarula.Supervisor.start_link() do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp resolve_profile(profile) do
     case Amarula.whereis(profile) do

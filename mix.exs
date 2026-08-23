@@ -112,6 +112,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
         "README.md",
         "CHANGELOG.md",
         "docs/whatsapp_adapter_plan.md",
+        "docs/preview_validation.md",
         "CONTRIBUTING.md"
       ]
     ]
