@@ -60,7 +60,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
       {:jido_chat, "~> 1.1"},
       {:amarula, "~> 0.5.0"},
       {:protobuf, "~> 0.17.0", override: true},
-      {:zoi, "~> 0.18"},
+      {:zoi, "~> 0.18.11"},
       {:dotenvy, "~> 1.1", only: [:test]},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
