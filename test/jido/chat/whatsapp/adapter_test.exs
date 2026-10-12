@@ -524,6 +524,22 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert %{status: 400} = Adapter.format_webhook_response({:error, :bad_payload})
   end
 
+  test "listener preserves custom storage over a file root and forwards lifecycle sink" do
+    storage = {MyApp.Storage, tenant: "isolated"}
+    sink = {MyApp.Status, :emit, []}
+
+    assert {:ok, [spec]} =
+             Adapter.listener_child_specs("isolated",
+               sink_mfa: {MyApp.Ingress, :emit, []},
+               lifecycle_sink_mfa: sink,
+               ingress: %{mode: :linked_device, profile: "isolated", storage: storage, storage_root: "/unused"}
+             )
+
+    {_, _, [opts]} = spec.start
+    assert opts[:config].storage == storage
+    assert opts[:lifecycle_sink_mfa] == sink
+  end
+
   test "listener_child_specs/2 returns linked-device worker spec" do
     assert {:ok, []} = Adapter.listener_child_specs("bridge_whatsapp", ingress: %{mode: "manual"})
 
@@ -555,7 +571,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
 
     worker_opts = amarula_spec.start |> elem(2) |> hd()
     assert worker_opts[:config].profile == "settings_profile"
-    assert worker_opts[:config].storage == {Amarula.Storage.File, root: "/tmp/amarula"}
+    assert worker_opts[:config].storage_root == "/tmp/amarula"
     assert worker_opts[:config].max_retries == 0
     assert worker_opts[:config].retry_delay == 1_000
     assert worker_opts[:connect_opts] == [name: :wa_conn]

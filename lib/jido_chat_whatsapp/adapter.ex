@@ -525,6 +525,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     [
       bridge_id: bridge_id,
       sink_mfa: sink_mfa,
+      lifecycle_sink_mfa: Keyword.get(opts, :lifecycle_sink_mfa),
       sink_opts: [bridge_id: bridge_id],
       transport: get_map_value(ingress, [:transport, "transport"]) || AmarulaClient,
       config: connection_config(profile, ingress, opts),
@@ -540,13 +541,33 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     |> ensure_map()
     |> Map.merge(get_map_value(ingress, [:amarula, "amarula", :config, "config"]) |> ensure_map())
     |> Map.put(:profile, profile)
+    |> put_history_options(ingress)
     |> maybe_put_storage(ingress)
+    |> then(fn config ->
+      case get_map_value(ingress, [:storage, "storage"]) do
+        nil -> config
+        storage -> Map.put(config, :storage, storage)
+      end
+    end)
+  end
+
+  defp put_history_options(config, ingress) do
+    Enum.reduce([:sync_history, :sync_full_history], config, fn key, acc ->
+      value =
+        Map.get(
+          ingress,
+          key,
+          Map.get(ingress, Atom.to_string(key), Map.get(acc, key, Map.get(acc, Atom.to_string(key), true)))
+        )
+
+      Map.put(acc, key, value)
+    end)
   end
 
   defp maybe_put_storage(config, ingress) do
     case get_map_value(ingress, [:storage_root, "storage_root"]) do
       nil -> config
-      root -> Map.put(config, :storage, {Amarula.Storage.File, root: root})
+      root -> Map.put(config, :storage_root, root)
     end
   end
 

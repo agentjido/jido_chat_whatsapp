@@ -58,7 +58,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
   defp deps do
     [
       {:jido_chat, "~> 1.2 and >= 1.2.1"},
-      {:amarula, "~> 0.5.0"},
+      {:amarula, "~> 0.5.10"},
       {:protobuf, "~> 0.17.0", override: true},
       {:zoi, "~> 0.18.11"},
       {:dotenvy, "~> 1.1", only: [:test]},
@@ -113,6 +113,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
         "CHANGELOG.md",
         "docs/whatsapp_adapter_plan.md",
         "docs/preview_validation.md",
+        "docs/adapter_contracts.md",
         "CONTRIBUTING.md"
       ]
     ]

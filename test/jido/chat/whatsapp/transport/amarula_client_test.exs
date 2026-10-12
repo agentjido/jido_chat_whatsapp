@@ -35,6 +35,8 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
     on_exit(fn -> Amarula.stop(conn) end)
 
     assert {:ok, _via} = AmarulaClient.resolve_conn(profile: profile)
+    assert {:ok, aliases} = AmarulaClient.account_jids(conn)
+    assert aliases != []
     assert {:ok, text_id} = AmarulaClient.send_text(conn, "15551234567@s.whatsapp.net", "hello", [])
     assert is_binary(text_id)
 

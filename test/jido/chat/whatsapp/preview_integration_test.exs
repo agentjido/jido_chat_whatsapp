@@ -98,7 +98,7 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
   end
 
   test "receives, normalizes, and replies through the adapter boundary" do
-    {:ok, worker} =
+    {:ok, _worker} =
       start_supervised(
         {ConnectionWorker,
          bridge_id: "bridge_whatsapp_preview",
@@ -107,7 +107,7 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
          config: %{profile: "preview_local", test_pid: self()}}
       )
 
-    assert_receive {:transport_connected, ^worker}
+    assert_receive {:transport_connected, parent}
 
     incoming_message = %Msg{
       id: "wamid.inbound",
@@ -123,7 +123,7 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
     }
 
     send(
-      worker,
+      parent,
       {:amarula, :messages_upsert, %{id: "batch-preview", from: incoming_message.from, messages: [incoming_message]}}
     )
 

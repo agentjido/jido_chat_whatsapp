@@ -70,7 +70,8 @@ This is the expected mode for `jido_messaging` bridges.
       mode: "linked_device",
       profile: "agent_primary"
     },
-    sink_mfa: {Jido.Messaging.IngressSink, :emit, [MyApp.Messaging, "bridge_wa"]}
+    sink_mfa: {Jido.Messaging.IngressSink, :emit, [MyApp.Messaging, "bridge_wa"]},
+    lifecycle_sink_mfa: {MyApp.WhatsAppStatus, :emit, ["agent_primary"]}
   )
 
 children = [Amarula.Supervisor | specs]
@@ -79,9 +80,26 @@ children = [Amarula.Supervisor | specs]
 Start the shared `Amarula.Supervisor` before the generated connection workers.
 Only one shared Amarula supervisor is needed in the host application's supervision tree.
 
-On first pairing Amarula emits QR and pairing lifecycle updates. The worker
-forwards those as non-message action events. Chat messages from
-`:messages_upsert` are normalized into `Jido.Chat.Incoming`.
+The message sink receives chat payloads for `Adapter.transform_incoming/1`.
+Pairing, QR and connection updates go only to the optional `lifecycle_sink_mfa`.
+Both callbacks receive their configured arguments followed by `(payload, opts)`.
+Lifecycle maps carry `profile`, `attempt_id`, `event`, `status` and `qr`; treat
+that sink as a trusted credential display boundary. With no lifecycle sink,
+these updates are discarded. This replaces the preview's mixed action/chat sink.
+Only socket open reports `:connected`; pairing success reports `:authenticating`.
+QR expiry reports `status: :expired` and `qr: nil`, retained in subsequent
+`ConnectionWorker.status/1` snapshots. This differs from transport
+`:disconnected`. A replacement QR restores `:pairing`; connection, reconnect and
+logout replace expiry with their respective lifecycle statuses.
+
+The canonical incoming message includes `author.is_me`, `mentions`,
+`was_mentioned`, `reply_context`, and accurate DM/group facts. Phone/LID aliases
+come from the receiving connection through `Transport.account_jids/1`; no
+recipient or timestamp heuristics are used. Broadcast/newsletter rooms are
+unsupported. Group invocation policy remains with the host.
+
+See [adapter contracts](docs/adapter_contracts.md) for lifecycle, storage,
+compatibility, history delivery and host supervision requirements.
 
 Linked-device events are local Amarula process messages. They are not HTTP
 webhooks. `verify_webhook/2` is a compatibility no-op and is not an
@@ -109,10 +127,34 @@ Bridge listener settings can include:
   ingress: %{
     mode: "linked_device",
     profile: "agent_primary",
-    storage_root: "/var/lib/my_app/amarula"
+    storage_root: "/var/lib/my_app/amarula",
+    sync_history: false,
+    sync_full_history: false
   }
 }
 ```
+
+## Host-provided storage and lifecycle
+
+For custom persistence, pass `storage: {MyApp.WhatsAppStorage, options}` in
+`ingress`. The backend implements Amarula's profile-scoped storage callbacks;
+custom storage takes precedence over `storage_root`. No fallback to file storage
+occurs on callback failure. Encryption, atomic writes and durable storage are
+host responsibilities. See the [callback contract](docs/adapter_contracts.md).
+
+`ConnectionWorker.status/1` returns the current status. Use
+`ConnectionWorker.reconnect/1` to stop and start with the same configuration and a
+new attempt ID. Host supervisor shutdown stops the connection while retaining
+session storage. `ConnectionWorker.logout/1` explicitly unlinks and clears the
+profile; errors are returned. Duplicate live profile ownership is rejected.
+Protocol reconnect and process restart are handled by Amarula; the host owns
+bounded restart policy for the listener.
+
+Both history options default to `true`. `sync_history: false` suppresses history
+imports, while `sync_full_history: false` requests a recent window when history
+is enabled. Ordinary queued messages still arrive. Enabled imported messages
+have `incoming.metadata.history == true`; the host must deduplicate by message
+ID if history and live delivery overlap.
 
 ## Pairing
 

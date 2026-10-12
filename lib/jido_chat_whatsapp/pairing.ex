@@ -5,6 +5,15 @@ defmodule Jido.Chat.WhatsApp.Pairing do
 
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
+  @doc "Classifies lifecycle progress without retaining provider error or credential data."
+  @spec lifecycle_status(atom(), term()) :: atom() | nil
+  def lifecycle_status(:connection_update, %{connection: :open}), do: :connected
+  def lifecycle_status(:connection_update, %{connection: :closed}), do: :disconnected
+  def lifecycle_status(:connection_update, %{connection: :connecting}), do: :connecting
+  def lifecycle_status(:pairing_success, _), do: :authenticating
+  def lifecycle_status(event, _) when event in [:pairing_failure, :error], do: :failed
+  def lifecycle_status(_, _), do: nil
+
   @doc "Runs the interactive pairing flow for one Amarula profile."
   @spec run(String.t(), keyword()) :: :ok | :timeout | {:error, :connection_failed}
   def run(profile, opts) when is_binary(profile) and is_list(opts) do
@@ -56,6 +65,9 @@ defmodule Jido.Chat.WhatsApp.Pairing do
           Process.sleep(Keyword.get(transport_opts, :success_delay_ms, 1_000))
           :ok
 
+        {:error, :connection_failed} = error ->
+          error
+
         :timeout ->
           :timeout
       end
@@ -84,7 +96,9 @@ defmodule Jido.Chat.WhatsApp.Pairing do
           loop(transport, conn, transport_opts, deadline)
 
         {:amarula, :connection_update, %{connection: :open}} ->
-          :ok
+          if function_exported?(transport, :health, 1) and transport.health(conn) != :ok,
+            do: {:error, :connection_failed},
+            else: :ok
 
         {:amarula, :error, _error} ->
           Logger.error("WhatsApp connection error. Error data was redacted.")
