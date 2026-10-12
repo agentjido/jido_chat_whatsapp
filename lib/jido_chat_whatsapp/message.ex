@@ -188,6 +188,13 @@ defmodule Jido.Chat.WhatsApp.Message do
     do: struct |> Map.from_struct() |> normalize_content_map()
 
   defp normalize_content_value({jid, id}), do: %{jid: address_to_jid(jid), id: id}
+
+  defp normalize_content_value({jid, id, from_me}),
+    do: %{jid: address_to_jid(jid), id: id, from_me: from_me}
+
+  defp normalize_content_value({jid, id, from_me, participant}),
+    do: %{jid: address_to_jid(jid), id: id, from_me: from_me, participant: address_to_jid(participant)}
+
   defp normalize_content_value(value) when is_map(value), do: normalize_content_map(value)
   defp normalize_content_value(value) when is_list(value), do: Enum.map(value, &normalize_content_value/1)
   defp normalize_content_value(value), do: value
@@ -263,9 +270,10 @@ defmodule Jido.Chat.WhatsApp.Message do
   defp reaction_key(%{jid: jid, id: id}, _payload), do: {address_to_jid(jid), id}
   defp reaction_key(%{"jid" => jid, "id" => id}, _payload), do: {address_to_jid(jid), id}
   defp reaction_key({jid, id}, _payload), do: {address_to_jid(jid), id}
+  defp reaction_key({jid, id, _from_me}, _payload), do: {address_to_jid(jid), id}
+  defp reaction_key({jid, id, _from_me, _participant}, _payload), do: {address_to_jid(jid), id}
 
-  defp reaction_key(_key, payload),
-    do: {payload |> map_get([:channel_jid, "channel_jid"]) |> address_to_jid(), map_get(payload, [:id, "id"])}
+  defp reaction_key(_key, _payload), do: {nil, nil}
 
   defp reaction_user(payload) do
     user_id = map_get(payload, [:from_jid, "from_jid"]) || "unknown"

@@ -123,6 +123,59 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     assert opts[:path] == "/whatsapp/messages_upsert"
   end
 
+  test "reaction additions and removals emit envelopes for Amarula direct and group references" do
+    {_pid, parent, _profile} = worker()
+
+    for key <- [
+          {"123@s.whatsapp.net", "answer-pn", true},
+          {"123@lid", "answer-lid", true},
+          {"120363@g.us", "answer-group", true, "456@lid"}
+        ],
+        emoji <- ["👍", ""] do
+      msg = %Msg{
+        id: "reaction-wire-id",
+        channel: Address.pn("999"),
+        from: Address.lid("456"),
+        from_me: false,
+        type: :reaction,
+        content: %Amarula.Content.Reaction{key: key, emoji: emoji},
+        raw: %Proto.Message{}
+      }
+
+      send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
+
+      assert_receive {:sink_emit, %Jido.Chat.EventEnvelope{event_type: :reaction} = envelope, _opts}
+      assert envelope.channel_id == elem(key, 0)
+      assert envelope.message_id == elem(key, 1)
+      assert envelope.payload.message_id != msg.id
+      assert envelope.payload.user.user_id == "456@lid"
+      assert envelope.payload.added == (emoji != "")
+      assert envelope.payload.metadata.from_me == false
+    end
+  end
+
+  test "malformed reaction targets are rejected instead of emitted as text payloads" do
+    {pid, parent, _profile} = worker()
+
+    msg = %Msg{
+      id: "reaction-wire-id",
+      channel: Address.pn("123"),
+      from: Address.lid("456"),
+      type: :reaction,
+      content: %Amarula.Content.Reaction{key: nil, emoji: "👍"},
+      raw: %Proto.Message{}
+    }
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
+        refute_receive {:sink_emit, _, _}
+      end)
+
+    assert log =~ "missing_reaction_target"
+    assert Process.alive?(pid)
+  end
+
   test "lifecycle is correlated, sanitized, and connected only after socket open" do
     {pid, parent, profile} = worker()
     send(parent, {:amarula, :pairing_success, %{secret: "redact-me"}})

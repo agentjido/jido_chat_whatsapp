@@ -17,6 +17,12 @@ recipient does not imply a mention. Phone and LID aliases identify the receiving
 account; device suffixes do not change identity. Unsupported broadcast/newsletter
 rooms return an error rather than masquerading as DMs.
 
+Reactions follow transport event → worker → `Adapter.parse_event/2` →
+`EventEnvelope` (`event_type: :reaction`) → message sink. Amarula's direct
+`{chat, id, from_me}` and group `{chat, id, from_me, participant}` references
+identify the target message; the reaction's own ID is never a target fallback.
+Missing or unsupported target references are rejected before sink delivery.
+
 ## Public contract (work-5rb)
 
 Existing message sink `{module, function, args}` receives `args ++ [payload, opts]`.

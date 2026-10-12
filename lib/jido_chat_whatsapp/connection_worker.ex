@@ -2,7 +2,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   @moduledoc """
   Linked-device ingress translation, supervised by the host runtime.
 
-  `sink_mfa` receives chat payloads. Optional `lifecycle_sink_mfa` receives
+  `sink_mfa` receives chat payloads and normalized reaction event envelopes.
+  Optional `lifecycle_sink_mfa` receives
   sanitized profile/attempt-correlated status maps (including sensitive QR data).
   Both callbacks receive their base arguments followed by `[payload, opts]`.
   Lifecycle callbacks run in order outside the worker and may query its status.
@@ -15,7 +16,10 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
   use GenServer
 
-  alias Jido.Chat.WhatsApp.{AccountIdentity, Message, Pairing}
+  require Logger
+
+  alias Jido.Chat.WebhookRequest
+  alias Jido.Chat.WhatsApp.{AccountIdentity, Adapter, Message, Pairing}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   @type sink_mfa :: {module(), atom(), [term()]}
@@ -355,13 +359,25 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     Enum.each(messages, fn msg ->
       payload = Message.to_payload(msg, Map.put(metadata, :profile, state.profile)) |> Map.put(:account_jids, aliases)
 
-      invoke_sink(
-        state.sink_mfa,
-        payload,
-        state.sink_opts ++ [mode: :payload, path: "/whatsapp/#{metadata.event}", method: "WHATSAPP"]
-      )
+      case sink_payload(payload) do
+        {:ok, event} ->
+          invoke_sink(
+            state.sink_mfa,
+            event,
+            state.sink_opts ++ [mode: :payload, path: "/whatsapp/#{metadata.event}", method: "WHATSAPP"]
+          )
+
+        {:error, reason} ->
+          Logger.warning("[WhatsApp ConnectionWorker] Invalid reaction target: #{inspect(reason)}")
+      end
     end)
   end
+
+  defp sink_payload(%{type: :reaction} = payload) do
+    Adapter.parse_event(WebhookRequest.new(%{adapter_name: :whatsapp, payload: payload}))
+  end
+
+  defp sink_payload(payload), do: {:ok, payload}
 
   defp clear_qr(state) do
     if state.qr_timer, do: Process.cancel_timer(state.qr_timer)
