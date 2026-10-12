@@ -1,6 +1,14 @@
 defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   @moduledoc """
   Default WhatsApp transport backed by `Amarula`.
+
+  Loads Amarula's installed modules before reading persisted protocol records so
+  safe term decoders recognize their atoms and structs even in a fresh VM.
+
+  Authenticated identity reads the supplied connection's state and `me` fields
+  with one-second call deadlines. Raw credentials remain inside this boundary.
+  Only PN/LID aliases and an optional account name are returned; Amarula may not
+  learn the name with history disabled. Identity reads never change history flags.
   """
 
   @behaviour Jido.Chat.WhatsApp.Transport
@@ -10,12 +18,73 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   alias Amarula.Protocol.Auth.QRCodeGenerator
   alias Amarula.Protocol.Socket.ConnectionSupervisor
   alias Jido.Chat.WhatsApp.Transport.GuardedStorage
+  alias Jido.Chat.WhatsApp.{AccountIdentity, Message}
+
+  @identity_call_timeout 1_000
+
+  @impl true
+  def user_phone(conn, jid) when is_binary(jid) do
+    case Message.normalize_jids([jid]) do
+      [normalized] ->
+        address =
+          if String.ends_with?(normalized, "@lid"),
+            do: Amarula.Contacts.pn_for_lid(conn, normalized),
+            else: normalized
+
+        pn = if is_struct(address, Amarula.Address), do: Amarula.Address.to_jid!(address), else: address
+        {:ok, phone_from_jid(pn)}
+
+      _ ->
+        {:error, :invalid_user}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  def user_phone(_, _), do: {:error, :invalid_user}
+
+  defp phone_from_jid(jid) when is_binary(jid) do
+    case Regex.run(~r/^([0-9]+)@s\.whatsapp\.net$/, jid) do
+      [_, number] -> "+" <> number
+      _ -> nil
+    end
+  end
+
+  defp phone_from_jid(_), do: nil
 
   @impl true
   def account_jids(conn) do
-    me = conn |> GenServer.call(:get_auth_creds) |> Map.get(:me, %{})
-    {:ok, Enum.reject([me[:id], me[:lid]], &is_nil/1)}
+    with {:ok, me} <- account_me(conn) do
+      {:ok, Message.normalize_jids([me[:id], me[:lid]])}
+    end
+  end
+
+  @impl true
+  def account_identity(conn) do
+    with :connected <- GenServer.call(conn, :get_connection_state, @identity_call_timeout),
+         {:ok, me} <- account_me(conn) do
+      AccountIdentity.normalize(%{account_jids: [me[:id], me[:lid]], display_name: me[:name]})
+    else
+      {:error, :timeout} -> {:error, :timeout}
+      _ -> {:error, :unavailable}
+    end
+  rescue
+    _ -> {:error, :unavailable}
   catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  # Raw credentials stay inside this transport and are never returned to callers.
+  defp account_me(conn) do
+    me = conn |> GenServer.call(:get_auth_creds, @identity_call_timeout) |> Map.get(:me)
+    {:ok, if(is_map(me), do: Map.take(me, [:id, :lid, :name]), else: %{})}
+  rescue
+    _ -> {:error, :identity_unavailable}
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
     :exit, _ -> {:error, :identity_unavailable}
   end
 
@@ -30,6 +99,7 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   @impl true
   def connect(config, opts) when is_map(config) and is_list(opts) do
     with :ok <- validate_profile(config),
+         :ok <- load_protocol_modules(),
          {:ok, built} <- build_connection(config, opts),
          {:ok, pid} <-
            make_socket(built, Keyword.put(opts, :parent_pid, opts[:parent] || opts[:parent_pid] || self()), 20) do
@@ -90,6 +160,15 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
     do: validate_profile(%{profile: Atom.to_string(profile)})
 
   defp validate_profile(_), do: {:error, :missing_profile}
+
+  defp load_protocol_modules do
+    with result when result in [:ok, {:error, {:already_loaded, :amarula}}] <- Application.load(:amarula),
+         :ok <- Code.ensure_all_loaded(Application.spec(:amarula, :modules)) do
+      :ok
+    else
+      _ -> {:error, :connection_failed}
+    end
+  end
 
   defp build_connection(config, opts) do
     config =

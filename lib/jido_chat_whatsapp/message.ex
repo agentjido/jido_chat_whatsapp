@@ -308,7 +308,9 @@ defmodule Jido.Chat.WhatsApp.Message do
     end
   end
 
-  defp normalize_jids(values),
+  @doc "Normalizes and deduplicates JID aliases using the same identity rules as mentions."
+  @spec normalize_jids(term()) :: [String.t()]
+  def normalize_jids(values),
     do: values |> List.wrap() |> Enum.map(&identity_jid/1) |> Enum.reject(&is_nil/1) |> Enum.uniq()
 
   defp author(nil, _self, _name), do: nil

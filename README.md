@@ -83,7 +83,8 @@ Only one shared Amarula supervisor is needed in the host application's supervisi
 The message sink receives chat payloads for `Adapter.transform_incoming/1`.
 Pairing, QR and connection updates go only to the optional `lifecycle_sink_mfa`.
 Both callbacks receive their configured arguments followed by `(payload, opts)`.
-Lifecycle maps carry `profile`, `attempt_id`, `event`, `status` and `qr`; treat
+Lifecycle maps carry `profile`, `attempt_id`, `event`, `status`, `qr`, `identity`,
+`identity_status` and `identity_error`; treat
 that sink as a trusted credential display boundary. With no lifecycle sink,
 these updates are discarded. This replaces the preview's mixed action/chat sink.
 Only socket open reports `:connected`; pairing success reports `:authenticating`.
@@ -91,6 +92,19 @@ QR expiry reports `status: :expired` and `qr: nil`, retained in subsequent
 `ConnectionWorker.status/1` snapshots. This differs from transport
 `:disconnected`. A replacement QR restores `:pairing`; connection, reconnect and
 logout replace expiry with their respective lifecycle statuses.
+
+Authenticated account identity is fetched asynchronously on socket open. A
+`:identity_updated` lifecycle event and `ConnectionWorker.status/1` expose only
+`%{phone_number: "+15551234567", display_name: nil, account_jids: [...]}`.
+Phone comes only from a PN alias; LID-only accounts have no inferred phone.
+Unknown names remain nil. `:connected` is independent of `identity_status`
+(`:pending`, `:available`, `:unavailable`). To fetch a late name or retry an
+unavailable identity, call `ConnectionWorker.refresh_identity(worker)`; this
+returns immediately and never enables history. A name is not guaranteed with
+history disabled. Lifecycle callbacks run in order outside the worker and may
+query status. The host owns confirmation, temporary profiles and channel creation.
+See the [identity contract](docs/adapter_contracts.md#authenticated-account-identity-work-jut)
+for deadlines, fixed errors, examples and clearing semantics.
 
 The canonical incoming message includes `author.is_me`, `mentions`,
 `was_mentioned`, `reply_context`, and accurate DM/group facts. Phone/LID aliases

@@ -13,6 +13,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     Incoming,
     Media,
     Response,
+    UserInfo,
     WebhookRequest,
     WebhookResponse
   }
@@ -98,6 +99,19 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   end
 
   def transform_incoming(_), do: {:error, :unsupported_message_type}
+
+  @impl true
+  def get_user(jid, opts \\ []) do
+    opts = SendOptions.new(opts)
+    client = transport(opts)
+
+    with true <-
+           (Code.ensure_loaded?(client) and function_exported?(client, :user_phone, 2)) || {:error, :unsupported},
+         {:ok, conn} <- client.resolve_conn(SendOptions.conn_opts(opts)),
+         {:ok, phone} <- client.user_phone(conn, jid) do
+      {:ok, UserInfo.new(%{id: jid, metadata: %{phone: phone}})}
+    end
+  end
 
   @impl true
   def send_message(jid, text, opts \\ []) do
@@ -526,6 +540,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       bridge_id: bridge_id,
       sink_mfa: sink_mfa,
       lifecycle_sink_mfa: Keyword.get(opts, :lifecycle_sink_mfa),
+      identity_timeout_ms: Keyword.get(opts, :identity_timeout_ms, 2_500),
       sink_opts: [bridge_id: bridge_id],
       transport: get_map_value(ingress, [:transport, "transport"]) || AmarulaClient,
       config: connection_config(profile, ingress, opts),

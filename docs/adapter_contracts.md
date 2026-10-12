@@ -21,7 +21,8 @@ rooms return an error rather than masquerading as DMs.
 
 Existing message sink `{module, function, args}` receives `args ++ [payload, opts]`.
 An optional `lifecycle_sink_mfa` uses the same invocation shape and receives a
-plain map with `profile`, `attempt_id`, `event`, `status`, and `qr`. QR data is
+plain map with `profile`, `attempt_id`, `event`, `status`, `qr`, `identity`,
+`identity_status` and `identity_error`. QR data is
 only sent to this explicitly configured trusted sink. Without it lifecycle
 updates are discarded, never sent to chat ingress. This intentionally changes
 the preview's mixed action/message sink behavior. Pairing success is progress;
@@ -59,6 +60,87 @@ gates historical import delivery, the latter requests full versus recent history
 Neither gates ordinary `messages_upsert`, including queued messages. No timestamp
 heuristics. Enabled history is delivered with explicit history metadata.
 
+## Authenticated account identity (work-jut)
+
+`Transport.account_identity(conn)` is an optional callback returning
+`{:ok, %{phone_number: string_or_nil, display_name: string_or_nil,
+account_jids: normalized_jids}}` or `{:error, :unavailable | :timeout}`.
+`AccountIdentity.normalize/1` allowlists these three fields and shares alias
+normalization with `Message`. The worker normalizes custom transport results too.
+Only the supplied authenticated connection may provide these facts; inbound
+pushnames, sender JIDs and global account defaults are never identity sources.
+Raw credentials, keys, storage records and provider errors stay behind Transport.
+
+A phone number is `+` followed by the digits of the authenticated PN JID with its
+device suffix removed. This is a provider identifier, not independent validation
+of an E.164 number. A LID is opaque and never supplies a phone number. Alias lists
+are deduplicated and contain only normalized PN/LID JIDs. An identity with only a
+LID is available with `phone_number: nil`; no valid aliases means unavailable.
+Names are trimmed; missing, non-string, blank and `~` names become nil. A missing
+name does not make an otherwise known identity unavailable.
+
+Socket open publishes `status: :connected` independently of identity availability
+and starts an asynchronous lookup. `ConnectionWorker.status/1` reads cached state
+without querying the transport. Lifecycle events and status snapshots have the
+same shape (here `attempt` is the current opaque reference):
+
+```elixir
+%{profile: "setup-session", attempt_id: attempt,
+  event: :connection_update, status: :connected, qr: nil,
+  identity: nil, identity_status: :pending, identity_error: nil}
+
+%{profile: "setup-session", attempt_id: attempt,
+  event: :identity_updated, status: :connected, qr: nil,
+  identity: %{phone_number: "+15551234567", display_name: nil,
+              account_jids: ["15551234567@s.whatsapp.net", "987654@lid"]},
+  identity_status: :available, identity_error: nil}
+
+# A subsequent status/1 query returns the same identity, with event: :status.
+```
+
+`identity_status` is `:pending`, `:available` or `:unavailable`. Pending and
+available have `identity_error: nil`; unavailable has `identity: nil` and a fixed
+error: `:not_connected`, `:unsupported`, `:unavailable`, `:timeout` or `:failed`.
+Transport errors/exceptions/exits never turn a healthy connection into a failed
+connection or expose raw error terms. A missing callback reports `:unsupported`.
+
+`ConnectionWorker.refresh_identity(worker)` returns `:ok` immediately while
+connected, or `{:error, :not_connected}` otherwise. It clears the previous cached
+identity, publishes `:identity_pending` when a new lookup starts, and eventually
+publishes `:identity_updated`. Concurrent requests coalesce. Unsupported transports
+remain unavailable without starting a lookup. Each socket-open event retries;
+there is no automatic polling between opens. Hosts may explicitly refresh for a
+late name or previously unavailable identity. Both history flags remain unchanged.
+Amarula 0.5.10 may only learn the account name from history, so refresh cannot
+guarantee a name when history is disabled. Hosts must support an absent name.
+
+Each lookup has a worker deadline of 2,500 ms by default; pass
+`identity_timeout_ms: milliseconds` at the top level of `listener_child_specs/2`
+options to use 1..5,000 ms. Amarula's individual state/credential calls each have
+a 1,000 ms timeout. Expired queries are terminated. Results are guarded by both
+attempt and request tokens. Pairing, authentication progress, QR expiry,
+disconnection, failure, explicit reconnect and logout invalidate cached and
+pending identity. Even an unsuccessful logout clears the cached identity;
+refresh or reconnect is required to recover it. Persisted authenticated sessions
+recover identity on open without another scan. Another profile or an old query
+cannot replace the current identity, including within a protocol reconnect that
+retains the attempt ID.
+
+Lifecycle callbacks now run asynchronously in order in a worker-owned linked
+process, so callbacks may call `status/1` or `refresh_identity/1` without a
+reentrant deadlock. A callback's snapshot can be older than a fresh status query.
+Callback errors are discarded without raw logging or retries; hosts should keep
+callbacks short and own durable delivery if needed. Shutdown stops this process
+and any pending lookup. No runtime supervisor is introduced. The chat sink's
+existing behavior is unchanged.
+
+For QR-first setup, the host owns a temporary isolated profile and storage,
+consumes the dedicated lifecycle sink, and uses a fresh status snapshot before
+confirmation. Require the expected profile/attempt, `status: :connected` and
+`identity_status: :available`; tolerate nil phone/name as product policy permits.
+The adapter never creates a channel or confirms a user decision. Temporary
+sessions, UI, channel creation and encrypted session transfer remain host work.
+
 ## Failure matrix and validation map
 
 | Condition | Contract | Regression evidence required |
@@ -84,6 +166,12 @@ flags. There is no separate decoder process in this version. Its `update_creds`
 ignores storage write return values and its default file adapter treats corrupt
 reads as misses. Custom strict storage needs a transport-side guard (implemented here); upstream
 should propagate typed storage failures throughout protocol operations.
+
+Jido.Chat 1.2.1 has `get_user/2` for a supplied user ID, but no authenticated
+self-account callback; the optional Transport callback fills that gap. No
+upstream change blocks this identity API. Guaranteed account names with history
+disabled would require an upstream authenticated name source in Amarula; this
+implementation deliberately promises only an optional name.
 
 The host must consume the new lifecycle sink separately and provide a bounded
 restart policy. Generic dynamic profile supervision and host integration tests
@@ -130,8 +218,12 @@ corruption-as-miss behavior; strict failure guarantees require custom storage.
 The supported dependency floor is Amarula 0.5.10 and Jido.Chat 1.2.1.
 Existing raw message normalization, outbound calls, bridge-derived profile names
 and file storage roots remain available. Custom transports may omit the new
-optional identity/health/logout callbacks; without identity, self mentions cannot
-be identified; without health, persistence guarantees belong to that transport.
+optional `account_identity/1`, `account_jids/1`, health and logout callbacks.
+Without `account_identity/1`, authenticated identity is explicitly unavailable;
+`account_jids/1` still independently supports self/mention detection. Without
+`account_jids/1`, alias-based self mentions cannot be identified. Without health,
+persistence guarantees belong to that transport. `account_jids/1` now normalizes
+and deduplicates Amarula device aliases; its tuple/list contract is unchanged.
 Custom transports must send `{:amarula, event, data}` to the supplied `:parent`,
 not directly to the worker; each receiver belongs to one attempt. The receiver
 monitors its worker for cleanup, and the worker monitors the receiver. The host

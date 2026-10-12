@@ -53,17 +53,28 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     profile: profile
   } do
     creds =
-      Amarula.Protocol.Auth.AuthUtils.init_auth_creds() |> Map.put(:me, %{id: "123@s.whatsapp.net", lid: "456@lid"})
+      Amarula.Protocol.Auth.AuthUtils.init_auth_creds()
+      |> Map.put(:me, %{id: "123:7@s.whatsapp.net", lid: "456:2@lid", name: "Restored"})
 
     :ok = Store.put(table, profile, :creds, :self, creds)
     assert {:ok, conn} = AmarulaClient.connect(config, [])
     assert {:ok, ["123@s.whatsapp.net", "456@lid"]} = AmarulaClient.account_jids(conn)
+    assert {:ok, identity} = AmarulaClient.account_identity(conn)
+
+    assert identity == %{
+             phone_number: "+123",
+             display_name: "Restored",
+             account_jids: ["123@s.whatsapp.net", "456@lid"]
+           }
+
     assert :ok = AmarulaClient.stop(conn, [])
     assert {:ok, ^creds} = Store.get(table, profile, :creds, :self)
     assert {:ok, restored} = AmarulaClient.connect(config, [])
     assert {:ok, ["123@s.whatsapp.net", "456@lid"]} = AmarulaClient.account_jids(restored)
+    assert {:ok, ^identity} = AmarulaClient.account_identity(restored)
     assert {:ok, other} = AmarulaClient.connect(%{config | profile: profile <> "_other"}, [])
     assert {:ok, []} = AmarulaClient.account_jids(other)
+    assert {:error, :unavailable} = AmarulaClient.account_identity(other)
     assert :ok = AmarulaClient.stop(other, [])
   end
 
@@ -170,6 +181,33 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
 
   defmodule Sink do
     def emit(pid, event, _opts), do: send(pid, {:event, event})
+  end
+
+  test "worker recovers sanitized identity from stored authentication without a new QR", %{
+    config: config,
+    table: table,
+    profile: profile
+  } do
+    alias Jido.Chat.WhatsApp.ConnectionWorker
+
+    creds = Amarula.Protocol.Auth.AuthUtils.init_auth_creds()
+    :ok = Store.put(table, profile, :creds, :self, Map.put(creds, :me, %{id: "123:5@s.whatsapp.net", name: "Known"}))
+
+    worker =
+      start_supervised!(
+        {ConnectionWorker,
+         bridge_id: "restored",
+         config: Map.merge(config, %{sync_history: false, sync_full_history: false}),
+         sink_mfa: {Sink, :emit, [self()]},
+         lifecycle_sink_mfa: {Sink, :emit, [self()]}}
+      )
+
+    send(:sys.get_state(worker).relay, {:amarula, :connection_update, %{connection: :open}})
+    assert_receive {:event, %{status: :connected, identity_status: :pending}}
+    assert_receive {:event, %{event: :identity_updated, identity: identity, identity_status: :available}}
+    assert identity == %{phone_number: "+123", display_name: "Known", account_jids: ["123@s.whatsapp.net"]}
+    assert ConnectionWorker.status(worker).identity == identity
+    refute_receive {:event, %{event: :qr_available}}
   end
 
   test "worker cannot announce pairing success after persistence failure", %{config: config, table: table} do

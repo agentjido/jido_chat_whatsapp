@@ -5,12 +5,17 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   `sink_mfa` receives chat payloads. Optional `lifecycle_sink_mfa` receives
   sanitized profile/attempt-correlated status maps (including sensitive QR data).
   Both callbacks receive their base arguments followed by `[payload, opts]`.
+  Lifecycle callbacks run in order outside the worker and may query its status.
+  Identity is fetched asynchronously after socket open and cached; availability
+  is separate from connection status. `refresh_identity/1` can retrieve a late
+  account name without enabling history synchronization. Its deadline defaults
+  to 2,500 ms (`:identity_timeout_ms`, allowed range 1..5,000).
   Lifecycle data is never sent to the chat sink. See `docs/adapter_contracts.md`.
   """
 
   use GenServer
 
-  alias Jido.Chat.WhatsApp.{Message, Pairing}
+  alias Jido.Chat.WhatsApp.{AccountIdentity, Message, Pairing}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   @type sink_mfa :: {module(), atom(), [term()]}
@@ -19,13 +24,27 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
-  Returns the current profile and attempt status, including the current QR.
+  Returns cached profile/attempt status, QR and sanitized account identity.
+
+  This performs no transport query. `identity_status` is `:pending`, `:available`
+  or `:unavailable`; `identity_error` is nil or a fixed failure category.
+  Missing phone/name fields may be nil even when identity is available.
 
   QR expiry retains `status: :expired` with `qr: nil` until the next lifecycle
   transition. This is distinct from transport `:disconnected` status.
   """
   @spec status(GenServer.server()) :: map()
   def status(worker), do: GenServer.call(worker, :status)
+
+  @doc """
+  Starts a bounded, asynchronous identity refresh while connected.
+
+  Returns immediately. Observe `:identity_updated` lifecycle events or read
+  `status/1` for the result. Concurrent refreshes coalesce. This never enables
+  history synchronization and does not promise that the provider has a name.
+  """
+  @spec refresh_identity(GenServer.server()) :: :ok | {:error, :not_connected}
+  def refresh_identity(worker), do: GenServer.call(worker, :refresh_identity)
 
   @doc "Stops and reconnects with the same profile, storage and protocol options."
   @spec reconnect(GenServer.server()) :: :ok | {:error, term()}
@@ -42,7 +61,10 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     lifecycle = Keyword.get(opts, :lifecycle_sink_mfa)
     config = Keyword.fetch!(opts, :config)
 
-    with :ok <- validate_sink(sink),
+    timeout = Keyword.get(opts, :identity_timeout_ms, 2_500)
+
+    with :ok <- validate_identity_timeout(timeout),
+         :ok <- validate_sink(sink),
          :ok <- validate_optional_sink(lifecycle) do
       state = %{
         bridge_id: Keyword.fetch!(opts, :bridge_id),
@@ -61,10 +83,23 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         qr_count: 0,
         relay: nil,
         relay_monitor: nil,
-        conn: nil
+        conn: nil,
+        identity: nil,
+        identity_status: :unavailable,
+        identity_error: :not_connected,
+        identity_request: nil,
+        identity_timeout_ms: timeout,
+        lifecycle_dispatcher: start_dispatcher(lifecycle)
       }
 
-      connect(state)
+      case connect(state) do
+        {:ok, _} = result ->
+          result
+
+        error ->
+          stop_dispatcher(state)
+          error
+      end
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -73,7 +108,17 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   @impl true
   def handle_call(:status, _from, state), do: {:reply, notification(state, :status), state}
 
+  def handle_call(:refresh_identity, _from, %{status: :connected} = state) do
+    next = begin_identity(state)
+    if next != state, do: notify(next, :identity_pending)
+    {:reply, :ok, next}
+  end
+
+  def handle_call(:refresh_identity, _from, state), do: {:reply, {:error, :not_connected}, state}
+
   def handle_call(:reconnect, _from, state) do
+    state = clear_identity(state)
+
     with :ok <- stop_connection(state),
          {:ok, next} <-
            connect(%{clear_qr(state) | attempt_id: make_ref(), qr_count: 0, status: :connecting, conn: nil}) do
@@ -88,6 +133,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   def handle_call(:logout, _from, state) do
+    state = clear_identity(state)
+
     if function_exported?(state.transport, :logout, 2) do
       case state.transport.logout(state.conn, state.connect_opts) do
         :ok ->
@@ -115,6 +162,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
   @impl true
   def terminate(_reason, state) do
+    clear_identity(state)
+    stop_dispatcher(state)
     stop_connection(state)
     :ok
   end
@@ -130,14 +179,45 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
       true ->
         stop_connection(state)
-        state = %{clear_qr(state) | status: :failed, conn: nil}
+        state = %{(state |> clear_qr() |> clear_identity()) | status: :failed, conn: nil}
         notify(state, :storage_or_connection_failed)
         {:noreply, state}
     end
   end
 
+  def handle_info(
+        {:identity_result, attempt, token, result},
+        %{attempt_id: attempt, status: :connected, identity_request: %{token: token}} = state
+      ) do
+    state = clear_identity(state)
+
+    next =
+      case result do
+        {:ok, identity} -> %{state | identity: identity, identity_status: :available, identity_error: nil}
+        {:error, error} -> %{state | identity_error: error}
+      end
+
+    notify(next, :identity_updated)
+    {:noreply, next}
+  end
+
+  def handle_info({:identity_timeout, token}, %{identity_request: %{token: token}} = state) do
+    state = %{clear_identity(state) | identity_error: :timeout}
+    notify(state, :identity_updated)
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{identity_request: %{monitor: ref}} = state) do
+    state = %{clear_identity(state) | identity_error: :failed}
+    notify(state, :identity_updated)
+    {:noreply, state}
+  end
+
+  def handle_info({:EXIT, pid, _reason}, %{lifecycle_dispatcher: pid} = state),
+    do: {:stop, :lifecycle_sink_failed, state}
+
   def handle_info({:qr_expired, attempt, token}, %{attempt_id: attempt, qr_token: token} = state) do
-    state = %{clear_qr(state) | status: :expired}
+    state = %{(state |> clear_qr() |> clear_identity()) | status: :expired}
     notify(state, :qr_expired)
     {:noreply, state}
   end
@@ -247,7 +327,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp handle_event(:connection_update, %{qr: qr}, state) when is_binary(qr) do
-    state = clear_qr(state)
+    state = state |> clear_qr() |> clear_identity()
     token = make_ref()
     ttl = if state.qr_count == 0, do: Map.get(state.config, :qr_timeout, 60_000), else: 20_000
     timer = Process.send_after(self(), {:qr_expired, state.attempt_id, token}, ttl)
@@ -262,7 +342,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         state
 
       status ->
-        state = %{clear_qr(state) | status: status}
+        state = %{(state |> clear_qr() |> clear_identity()) | status: status}
+        state = if status == :connected, do: begin_identity(state), else: state
         notify(state, event)
         state
     end
@@ -293,11 +374,98 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
       attempt_id: state.attempt_id,
       event: event,
       status: state.status,
-      qr: state.qr
+      qr: state.qr,
+      identity: state.identity,
+      identity_status: state.identity_status,
+      identity_error: state.identity_error
     }
 
   defp notify(%{lifecycle_sink_mfa: nil}, _), do: :ok
-  defp notify(state, event), do: invoke_sink(state.lifecycle_sink_mfa, notification(state, event), state.sink_opts)
+
+  defp notify(state, event),
+    do: send(state.lifecycle_dispatcher, {:notify, notification(state, event), state.sink_opts})
+
+  # Deliver callbacks in order outside the worker so sinks may safely query
+  # status or request an identity refresh. No new runtime supervisor is needed.
+  defp start_dispatcher(nil), do: nil
+  defp start_dispatcher(sink), do: spawn_link(fn -> dispatch_loop(sink) end)
+  defp stop_dispatcher(%{lifecycle_dispatcher: nil}), do: :ok
+  defp stop_dispatcher(state), do: Process.exit(state.lifecycle_dispatcher, :shutdown)
+
+  defp dispatch_loop(sink) do
+    receive do
+      {:notify, payload, opts} ->
+        deliver_notification(sink, payload, opts)
+        dispatch_loop(sink)
+    end
+  end
+
+  defp deliver_notification(sink, payload, opts) do
+    invoke_sink(sink, payload, opts)
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp begin_identity(%{identity_request: request} = state) when not is_nil(request), do: state
+
+  defp begin_identity(state) do
+    if function_exported?(state.transport, :account_identity, 1) do
+      owner = self()
+      attempt = state.attempt_id
+      token = make_ref()
+      transport = state.transport
+      conn = state.conn
+
+      {pid, monitor} =
+        :erlang.spawn_opt(
+          fn ->
+            result = read_identity(transport, conn)
+            send(owner, {:identity_result, attempt, token, result})
+          end,
+          [:link, :monitor]
+        )
+
+      timer = Process.send_after(self(), {:identity_timeout, token}, state.identity_timeout_ms)
+
+      %{
+        state
+        | identity: nil,
+          identity_status: :pending,
+          identity_error: nil,
+          identity_request: %{pid: pid, monitor: monitor, token: token, timer: timer}
+      }
+    else
+      %{state | identity: nil, identity_status: :unavailable, identity_error: :unsupported}
+    end
+  end
+
+  defp read_identity(transport, conn) do
+    case transport.account_identity(conn) do
+      {:ok, identity} -> AccountIdentity.normalize(identity)
+      {:error, error} when error in [:unsupported, :unavailable, :timeout] -> {:error, error}
+      _ -> {:error, :failed}
+    end
+  rescue
+    _ -> {:error, :failed}
+  catch
+    _, _ -> {:error, :failed}
+  end
+
+  defp clear_identity(state) do
+    if request = state.identity_request do
+      Process.cancel_timer(request.timer)
+      Process.demonitor(request.monitor, [:flush])
+      Process.unlink(request.pid)
+      Process.exit(request.pid, :kill)
+    end
+
+    %{state | identity: nil, identity_status: :unavailable, identity_error: :not_connected, identity_request: nil}
+  end
+
+  defp validate_identity_timeout(value) when is_integer(value) and value > 0 and value <= 5_000, do: :ok
+  defp validate_identity_timeout(_), do: {:error, :invalid_identity_timeout}
 
   defp account_jids(state) do
     if function_exported?(state.transport, :account_jids, 1) do
