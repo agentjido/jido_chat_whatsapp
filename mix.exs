@@ -49,7 +49,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
   def application do
     [
       mod: {Jido.Chat.WhatsApp.Application, []},
-      extra_applications: [:logger]
+      extra_applications: [:logger, :mnesia]
     ]
   end
 
@@ -63,6 +63,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
       {:protobuf, "~> 0.17.0", override: true},
       {:zoi, "~> 0.18.11"},
       {:dotenvy, "~> 1.1", only: [:test]},
+      {:stream_data, "~> 1.1", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.21", only: [:dev, :test], runtime: false},

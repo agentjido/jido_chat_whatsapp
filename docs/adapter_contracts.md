@@ -203,12 +203,103 @@ callbacks short and own durable delivery if needed. Shutdown stops this process
 and any pending lookup. No runtime supervisor is introduced. The chat sink's
 existing behavior is unchanged.
 
-For QR-first setup, the host owns a temporary isolated profile and storage,
-consumes the dedicated lifecycle sink, and uses a fresh status snapshot before
-confirmation. Require the expected profile/attempt, `status: :connected` and
-`identity_status: :available`; tolerate nil phone/name as product policy permits.
-The adapter never creates a channel or confirms a user decision. Temporary
-sessions, UI, channel creation and encrypted session transfer remain host work.
+For managed QR-first setup, `PairingSession` owns the isolated profile, bounded
+temporary storage, expiry, owner monitor and confirmation handoff. It requires a
+fresh displayed identity/attempt before confirmation. The host authorizes each
+command and owns UI, connector creation and encrypted persistence through trusted
+callbacks. Low-level listeners remain available for hosts with their own pairing
+orchestration. See [managed storage and pairing](#managed-storage-and-pairing).
+
+## Managed storage and pairing
+
+Start managed storage explicitly once per BEAM node, before preparing storage,
+confirming pairing or starting managed listeners:
+
+```elixir
+children = [
+  {Jido.Chat.WhatsApp.Storage.Runtime,
+   require_ram_schema: true,
+   max_value_bytes: 1_048_576,
+   max_scope_bytes: 16_777_216},
+  {DynamicSupervisor, name: MyHost.Connections, strategy: :one_for_one}
+]
+```
+
+These validated init options are immutable. Restart infrastructure to change them.
+The Mnesia OTP dependency starts with the application, but package tables are
+created only by this explicit child. It is separate from automatic Amarula
+transport ownership and works with `start_runtime: false`. File, DETS and custom
+backend consumers need not start managed storage. Duplicate starts fail normally.
+No global host configuration is overwritten. `require_ram_schema: true` rejects
+a disk schema; the default allows a host disk schema while keeping this package's
+table strictly local RAM. This is not a replicated/quorum store.
+
+`Storage.Mnesia.ready/0` returns `{:ok, {owner_pid, generation}}` or
+`{:error, :storage_unavailable}`. Startup is separate from readiness: unavailable
+tables are reconciled, operations fail closed, and old handles cannot recover by
+silently attaching to a new generation. Managed listeners are notified/monitored
+and terminate on storage loss so their host supervisor can restart them. Backend
+replacement preserves live tables and does not restart unrelated listeners.
+Mnesia/node restart loses RAM records. Shutdown never stops shared Mnesia or
+deletes its tables. Pairing credentials should remain in host durable storage.
+
+Use the backend directly as `storage: {Storage.Mnesia, scope: tenant_key}` or
+compose it with an authorized host document callback:
+
+```elixir
+storage_opts = [
+  profile: "support",
+  scope: {tenant_id, credential_id},
+  context: binding,
+  document_mfa: {MyHost.WhatsApp, :document, []},
+  volatile_namespaces: ["session", "sender_key"]
+]
+
+storage = {Jido.Chat.WhatsApp.Storage.Split, storage_opts}
+```
+
+The document callback receives `(context, request)`. Requests use `:get`, `:put`,
+`:delete`, `:clear`, `:list_keys` and `:delete_namespace`, with string namespaces
+and Base64-encoded uncompressed Erlang term keys/values. It must authorize every
+request and provide encryption/transactional durability. A `:list_keys` request
+for `"__binding_check__"` must return `{:ok, []}` only when the binding is current;
+the composite backend uses this before RAM operations. Use `:error` only for a
+missing record; failures return `{:error, reason}`. `clear` clears this binding's
+durable state. `Split.prepare/1` removes obsolete durable volatile namespaces;
+`Split.seed/2` authorizes and seeds volatile records once. No stale disk fallback
+or late snapshot resurrection is allowed. Host scope must distinguish credential
+generations as well as tenants. These are trusted code APIs, not public endpoints.
+
+For managed onboarding, call `PairingSession.execute(request, owner_id, opts)`
+only after host authorization. Begin request is `%{op: :begin, owner: browser_pid}`;
+later requests are `%{op: :status | :retry | :cancel | :confirm, session: pid}`.
+Begin options require `:supervisor`, stable binary `:attempt_id`, `:context`,
+`:persist_mfa` and `:start_mfa`. Optional `:ttl_ms` defaults to 180,000 (maximum
+600,000); `:adapter`, `:transport` and `:connect_opts` support transport injection.
+Owner ID must be non-nil and match on subsequent calls. Owner process loss or
+expiry discards temporary state. The host must reauthorize every command.
+
+Persistence MFA receives `(context, %{attempt_id: id, identity: identity,
+records: durable_snapshot})`. It must atomically and idempotently save by attempt
+ID, returning `{:ok, %{receipt: public_receipt, storage: split_storage_opts,
+runtime: opaque_runtime_context}}`. The package stops protocol writes before
+freezing; on save failure it retains that snapshot for retry. The start MFA
+receives `(context, opaque_runtime_context)` after one-time RAM seeding and
+returns `:ok` or an error. A saved receipt includes `runtime_pending: true` if
+seeding/start fails: persistence has already succeeded. Confirmation never requires
+re-pairing merely because runtime startup failed. Duplicate confirmation returns
+the same saved receipt.
+
+Callbacks run in bounded tasks (at most ten seconds and the remaining lifetime).
+A timeout may leave an uncertain durable commit: retries must reuse the attempt
+ID. The package never knows the host's users, SQL schema or encryption system.
+Public receipts must not contain secrets. QR/status is for trusted display only;
+raw snapshots and callback context are redacted from process status and errors.
+
+For rollout, stop existing/provisional connections before switching store ownership.
+Do not copy live volatile sessions or run parallel old/new writers. Retain host
+encrypted pairing; fresh RAM sessions may temporarily prevent decryption until
+the protocol re-establishes keys. Rollback follows the same stopped-runtime rule.
 
 ## Failure matrix and validation map
 

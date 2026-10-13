@@ -68,13 +68,15 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
     with :ok <- validate_identity_timeout(timeout),
          :ok <- validate_sink(sink),
-         :ok <- validate_optional_sink(lifecycle) do
+         :ok <- validate_optional_sink(lifecycle),
+         {:ok, storage_token} <- watch_storage(config) do
       state = %{
         bridge_id: Keyword.fetch!(opts, :bridge_id),
         sink_mfa: sink,
         lifecycle_sink_mfa: lifecycle,
         sink_opts: Keyword.get(opts, :sink_opts, []),
         transport: Keyword.get(opts, :transport, AmarulaClient),
+        storage_token: storage_token,
         config: config,
         connect_opts: Keyword.get(opts, :connect_opts, []),
         profile: config[:profile] || config["profile"],
@@ -228,6 +230,12 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   def handle_info({:DOWN, ref, :process, _pid, _}, %{relay_monitor: ref} = state),
     do: {:stop, :transport_receiver_failed, state}
 
+  def handle_info({:whatsapp_storage_down, token}, %{storage_token: token} = state),
+    do: {:stop, :storage_unavailable, state}
+
+  def handle_info({:DOWN, _, :process, pid, _}, %{storage_token: {pid, _}} = state),
+    do: {:stop, :storage_unavailable, state}
+
   def handle_info(_, state), do: {:noreply, state}
 
   defp connect(state) do
@@ -325,8 +333,22 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp healthy?(state) do
-    not function_exported?(state.transport, :health, 1) or state.transport.health(state.conn) == :ok
+    storage_healthy?(state.storage_token) and
+      (not function_exported?(state.transport, :health, 1) or state.transport.health(state.conn) == :ok)
   end
+
+  defp storage_healthy?(nil), do: true
+  defp storage_healthy?(token), do: Jido.Chat.WhatsApp.Storage.Mnesia.current?(token)
+
+  defp watch_storage(%{storage: {module, _}})
+       when module in [Jido.Chat.WhatsApp.Storage.Split, Jido.Chat.WhatsApp.Storage.Mnesia] do
+    with {:ok, {pid, _} = token} <- Jido.Chat.WhatsApp.Storage.Mnesia.watch() do
+      Process.monitor(pid)
+      {:ok, token}
+    end
+  end
+
+  defp watch_storage(_), do: {:ok, nil}
 
   defp stop_connection(state) do
     result = if state.conn, do: safe_stop(state.transport, state.conn, state.connect_opts), else: :ok

@@ -159,6 +159,12 @@ Bridge listener settings can include:
 
 ## Host-provided storage and lifecycle
 
+For package-managed RAM messaging state and QR-first onboarding, explicitly start
+`{Jido.Chat.WhatsApp.Storage.Runtime, require_ram_schema: true}` before consumers.
+`Storage.Split` combines authorized host persistence with the package Mnesia
+backend. `PairingSession` owns temporary storage, identity confirmation and
+handoff through host callbacks. See the [managed storage and pairing contract](docs/adapter_contracts.md#managed-storage-and-pairing).
+
 For custom persistence, pass `storage: {MyApp.WhatsAppStorage, options}` in
 `ingress`. The backend implements Amarula's profile-scoped storage callbacks;
 custom storage takes precedence over `storage_root`. No fallback to file storage
