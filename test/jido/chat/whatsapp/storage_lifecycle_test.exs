@@ -86,6 +86,38 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     assert Process.alive?(GenServer.whereis(current))
   end
 
+  test "opaque media references restore from stored credentials without extra storage entries", %{
+    config: config,
+    table: table
+  } do
+    alias Jido.Chat.WhatsApp.Adapter
+
+    # A paired device has persisted credentials before it receives media.
+    :ok = Store.put(table, config.profile, :creds, :self, Amarula.Protocol.Auth.AuthUtils.init_auth_creds())
+
+    payload = %{
+      id: "attachment",
+      channel_jid: "123@s.whatsapp.net",
+      from_jid: "456@s.whatsapp.net",
+      type: :media,
+      content: %{kind: :image, direct_path: "/mms/image", media_key: :crypto.strong_rand_bytes(32)}
+    }
+
+    assert {:ok, conn} = AmarulaClient.connect(config, [])
+    stored = :ets.tab2list(table)
+    assert {:ok, incoming} = Adapter.transform_incoming(payload, profile: config.profile)
+    reference = hd(incoming.media).url
+    assert :ets.tab2list(table) == stored
+    assert :ok = AmarulaClient.stop(conn, [])
+    assert {:ok, restored} = AmarulaClient.connect(config, [])
+    assert {:ok, descriptor} = AmarulaClient.resolve_media_reference(restored, reference)
+    assert descriptor.media_key == payload.content.media_key
+    assert :ets.tab2list(table) == stored
+    assert :ok = AmarulaClient.logout(restored, [])
+    assert {:ok, replacement} = AmarulaClient.connect(config, [])
+    assert {:error, :invalid_media_reference} = AmarulaClient.resolve_media_reference(replacement, reference)
+  end
+
   test "cleanup removes the whole owned instance even while connection child is absent", %{config: config} do
     assert {:ok, {:via, Registry, {_, {instance, :connection}}} = conn} = AmarulaClient.connect(config, [])
     supervisor = Amarula.Protocol.Socket.ConnectionSupervisor.supervisor_name(instance)

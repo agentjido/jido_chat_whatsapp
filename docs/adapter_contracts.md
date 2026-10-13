@@ -2,6 +2,45 @@
 
 ## Ownership and flows
 
+### Media references
+
+Linked-device media ingress emits a normalized `EventEnvelope` containing an
+`Incoming` with public attachment metadata and an opaque
+`whatsapp://media/v1/...` reference in `media.url` and `media.metadata.file_id`.
+Private download descriptors are removed from media metadata and both `raw`
+maps are empty. Hosts preserve the reference unchanged and call
+`Adapter.fetch_media(reference, profile: profile)` using the originating
+configuration, just as they supply the originating Telegram bot token.
+Hosts must still enforce authorization before fetching; reference possession
+does not replace application access checks.
+
+The default transport seals the descriptor with AES-256-GCM, a random nonce and
+a domain-separated key derived from the persisted signed identity private key
+and profile. It resolves and validates the descriptor before downloading and
+decrypting WhatsApp's CDN bytes. No extra host secret, attachment mapping store,
+or per-attachment credential write is needed. Keys never enter public media
+metadata. The reference is confidential but should still be treated as opaque,
+not parsed or edited by consumers.
+
+References survive runtime restarts when the same profile and credentials are
+restored. Fetching requires that profile's connection to be loaded, though its
+socket need not be connected. Another profile or replacement credentials cannot
+resolve the reference. Logout/re-pairing, profile renaming, credential loss, or
+WhatsApp CDN expiry can make old attachments unavailable. Version 1 references
+are limited to 24,000 bytes, with a maximum 16,384-byte private descriptor.
+
+For manual ingress, use `Adapter.transform_incoming(payload, opts)` or
+`Adapter.parse_event(request, opts)` with `:profile`, `:conn`, or `:connection`
+to obtain opaque references. The legacy no-options normalization and structured
+descriptor fetch API remain available to trusted direct callers and contain
+sensitive download information. Custom transports implement `media_reference/2`
+and `resolve_media_reference/2` for opaque media support; missing support or
+sealing failure never falls back to emitting private descriptors. Listener
+normalization failures emit the sanitized lifecycle event
+`:ingress_normalization_failed` and skip that message.
+
+### Runtime boundaries
+
 `Adapter.listener_child_specs/2` builds the existing `ConnectionWorker` child.
 The host (`jido_messaging`) owns its supervisor, restart policy and shared
 Amarula supervisor. The worker owns ingress translation and its connection
@@ -10,8 +49,9 @@ lease; Amarula owns sockets, protocol reconnects, decoding and protocol state.
 normalizer; `Pairing` interprets pairing progress, and the host owns UI/policy.
 No agent invocation decisions belong here.
 
-Flow: transport event → worker → plain payload → message sink →
-`Adapter.transform_incoming/1` → `Incoming`. Account aliases come from the
+Flow: transport event → worker → message sink. Text uses plain payloads that
+the host normalizes with `Adapter.transform_incoming/1`; media and reactions
+use normalized event envelopes. Account aliases come from the
 connection's transport, never an application-wide account lookup. A missing
 recipient does not imply a mention. Phone and LID aliases identify the receiving
 account; device suffixes do not change identity. Unsupported broadcast/newsletter

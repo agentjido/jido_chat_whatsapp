@@ -2,7 +2,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   @moduledoc """
   Linked-device ingress translation, supervised by the host runtime.
 
-  `sink_mfa` receives chat payloads and normalized reaction event envelopes.
+  `sink_mfa` receives chat payloads and normalized media/reaction event envelopes.
+  Media envelopes carry opaque references, never private download descriptors.
   Optional `lifecycle_sink_mfa` receives
   sanitized profile/attempt-correlated status maps (including sensitive QR data).
   Both callbacks receive their base arguments followed by `[payload, opts]`.
@@ -15,8 +16,6 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   """
 
   use GenServer
-
-  require Logger
 
   alias Jido.Chat.WebhookRequest
   alias Jido.Chat.WhatsApp.{AccountIdentity, Adapter, Message, Pairing}
@@ -359,7 +358,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     Enum.each(messages, fn msg ->
       payload = Message.to_payload(msg, Map.put(metadata, :profile, state.profile)) |> Map.put(:account_jids, aliases)
 
-      case sink_payload(payload) do
+      case sink_payload(payload, state) do
         {:ok, event} ->
           invoke_sink(
             state.sink_mfa,
@@ -367,17 +366,21 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
             state.sink_opts ++ [mode: :payload, path: "/whatsapp/#{metadata.event}", method: "WHATSAPP"]
           )
 
-        {:error, reason} ->
-          Logger.warning("[WhatsApp ConnectionWorker] Invalid reaction target: #{inspect(reason)}")
+        {:error, _reason} ->
+          if payload.type == :media, do: notify(state, :ingress_normalization_failed)
       end
     end)
   end
 
-  defp sink_payload(%{type: :reaction} = payload) do
-    Adapter.parse_event(WebhookRequest.new(%{adapter_name: :whatsapp, payload: payload}))
+  defp sink_payload(%{type: type} = payload, state) when type in [:reaction, :media] do
+    Adapter.parse_event(WebhookRequest.new(%{adapter_name: :whatsapp, payload: payload}),
+      conn: state.conn,
+      profile: state.profile,
+      transport: state.transport
+    )
   end
 
-  defp sink_payload(payload), do: {:ok, payload}
+  defp sink_payload(payload, _state), do: {:ok, payload}
 
   defp clear_qr(state) do
     if state.qr_timer, do: Process.cancel_timer(state.qr_timer)

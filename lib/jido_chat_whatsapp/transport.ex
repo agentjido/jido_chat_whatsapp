@@ -54,6 +54,12 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @callback download_media(Amarula.Content.Media.t()) ::
               {:ok, binary()} | {:error, term()}
 
+  @doc "Creates an opaque media reference scoped to this connection's persisted identity."
+  @callback media_reference(conn(), Amarula.Content.Media.t()) :: {:ok, String.t()} | {:error, term()}
+
+  @doc "Resolves an opaque reference using this connection, without returning credentials."
+  @callback resolve_media_reference(conn(), String.t()) :: {:ok, Amarula.Content.Media.t()} | {:error, term()}
+
   @callback send_reaction(conn(), message_ref(), emoji :: String.t()) ::
               send_result()
 
@@ -71,7 +77,9 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @callback request_pairing_code(conn(), phone :: String.t(), opts :: keyword()) ::
               {:ok, String.t()} | {:error, term()}
 
-  @optional_callbacks user_phone: 2,
+  @optional_callbacks media_reference: 2,
+                      resolve_media_reference: 2,
+                      user_phone: 2,
                       account_identity: 1,
                       health: 1,
                       logout: 2,

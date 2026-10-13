@@ -166,13 +166,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
       raw: %Proto.Message{}
     }
 
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
-        refute_receive {:sink_emit, _, _}
-      end)
-
-    assert log =~ "missing_reaction_target"
+    send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
+    refute_receive {:sink_emit, _, _}
     assert Process.alive?(pid)
   end
 

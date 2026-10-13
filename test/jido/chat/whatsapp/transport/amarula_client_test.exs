@@ -129,4 +129,39 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
 
     assert log =~ "WhatsApp download_media failed"
   end
+
+  test "opaque references fetch and decrypt through the real transport using the selected profile" do
+    previous = Application.get_env(:amarula, :req_options)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:amarula, :req_options, previous),
+        else: Application.delete_env(:amarula, :req_options)
+    end)
+
+    Application.put_env(:amarula, :req_options, adapter: MockMediaDownloadAdapter)
+    plaintext = "opaque reference download"
+    {:ok, encrypted} = Amarula.Protocol.Messages.Media.encrypt(plaintext, :image)
+    Process.put({MockMediaDownloadAdapter, :body}, encrypted.enc)
+    profile = "media_#{System.unique_integer([:positive])}"
+    {:ok, conn} = Amarula.Testing.start_offline(profile: profile)
+    on_exit(fn -> Amarula.stop(conn) end)
+
+    payload = %{
+      id: "media-1",
+      channel_jid: "123@s.whatsapp.net",
+      from_jid: "456@s.whatsapp.net",
+      type: :media,
+      content: %{
+        kind: :image,
+        url: "https://mmg.whatsapp.net/mms/image/encrypted",
+        media_key: encrypted.media_key,
+        file_sha256: encrypted.file_sha256,
+        file_enc_sha256: encrypted.file_enc_sha256
+      }
+    }
+
+    assert {:ok, incoming} = Jido.Chat.WhatsApp.Adapter.transform_incoming(payload, profile: profile)
+    assert {:ok, ^plaintext} = Jido.Chat.WhatsApp.Adapter.fetch_media(hd(incoming.media).url, profile: profile)
+  end
 end

@@ -83,22 +83,28 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   end
 
   @impl true
-  def transform_incoming(%Amarula.Msg{} = msg) do
-    with {:ok, attrs} <- Message.incoming_attrs(msg) do
+  def transform_incoming(payload), do: transform_incoming(payload, [])
+
+  @doc """
+  Normalizes an incoming message with optional connection-scoped media references.
+
+  Supplying `:conn`, `:connection` or `:profile` seals media descriptors through
+  the transport. Only public media metadata and an opaque reference leave this
+  boundary; raw media payloads are omitted. The listener always uses this mode.
+  Without connection options, the legacy structured-reference API is preserved.
+  """
+  @spec transform_incoming(term(), keyword()) :: {:ok, Incoming.t()} | {:error, term()}
+  def transform_incoming(%{message: message}, opts) when is_map(message), do: transform_incoming(message, opts)
+  def transform_incoming(%{"message" => message}, opts) when is_map(message), do: transform_incoming(message, opts)
+
+  def transform_incoming(%{} = payload, opts) when is_list(opts) do
+    with {:ok, attrs} <- Message.incoming_attrs(payload),
+         {:ok, attrs} <- normalize_media_references(attrs, opts) do
       {:ok, Incoming.new(attrs)}
     end
   end
 
-  def transform_incoming(%{message: message}) when is_map(message), do: transform_incoming(message)
-  def transform_incoming(%{"message" => message}) when is_map(message), do: transform_incoming(message)
-
-  def transform_incoming(%{} = payload) do
-    with {:ok, attrs} <- Message.incoming_attrs(payload) do
-      {:ok, Incoming.new(attrs)}
-    end
-  end
-
-  def transform_incoming(_), do: {:error, :unsupported_message_type}
+  def transform_incoming(_, _), do: {:error, :unsupported_message_type}
 
   @impl true
   def get_user(jid, opts \\ []) do
@@ -155,15 +161,17 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   @doc """
   Fetches and decrypts the bytes behind an inbound WhatsApp media reference.
 
-  WhatsApp media needs the CDN path, media key, and encrypted-file hash. These
-  values are kept in the normalized media metadata and passed to Amarula. A
-  reference must contain a 32-byte media key and either a direct CDN path or an
-  HTTPS URL on a WhatsApp host.
+  Accepts a `whatsapp://media/v1/...` reference or normalized media containing
+  it. Supply the originating profile or connection in opts, as for sending.
+  The transport resolves the private descriptor using persisted credentials.
+  Legacy structured descriptors remain supported for trusted direct callers.
   """
   @impl true
   def fetch_media(reference, opts \\ []) when is_list(opts) do
-    with {:ok, media} <- amarula_media(reference) do
-      transport = Keyword.get(opts, :transport, AmarulaClient)
+    transport = Keyword.get(opts, :transport, AmarulaClient)
+
+    with {:ok, descriptor} <- resolve_media_reference(reference, transport, opts),
+         {:ok, media} <- amarula_media(descriptor) do
       transport.download_media(media)
     end
   end
@@ -282,10 +290,10 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     end
   end
 
-  defp parse_payload_event(%{} = payload, _opts) do
+  defp parse_payload_event(%{} = payload, opts) do
     case payload_event(payload) do
       {:message, payload} ->
-        with {:ok, %Incoming{} = incoming} <- transform_incoming(payload) do
+        with {:ok, %Incoming{} = incoming} <- transform_incoming(payload, opts) do
           {:ok,
            EventEnvelope.new(%{
              adapter_name: :whatsapp,
@@ -294,7 +302,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
              channel_id: to_string(incoming.external_room_id),
              message_id: stringify(incoming.external_message_id),
              payload: incoming,
-             raw: payload,
+             raw: incoming.raw,
              metadata: %{source: :payload}
            })}
         end
@@ -402,6 +410,71 @@ defmodule Jido.Chat.WhatsApp.Adapter do
 
   defp upload_caption(%FileUpload{} = upload, %SendOptions{} = opts) do
     opts.caption || upload.metadata[:caption] || upload.metadata["caption"]
+  end
+
+  defp normalize_media_references(%{media: []} = attrs, _opts), do: {:ok, attrs}
+
+  defp normalize_media_references(attrs, opts) do
+    if Enum.any?([:conn, :connection, :profile], &Keyword.get(opts, &1)) do
+      client = Keyword.get(opts, :transport, AmarulaClient)
+
+      with {:ok, conn} <- client.resolve_conn(opts),
+           {:ok, media} <- seal_media_entries(attrs.media, client, conn) do
+        {:ok, %{attrs | media: media, raw: %{}}}
+      end
+    else
+      {:ok, attrs}
+    end
+  end
+
+  defp seal_media_entries(entries, client, conn) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
+      with {:ok, descriptor} <- amarula_media(entry),
+           {:ok, reference} when is_binary(reference) <- media_callback(client, :media_reference, conn, descriptor) do
+        public = entry |> Map.put(:url, reference) |> Map.put(:metadata, %{file_id: reference})
+        {:cont, {:ok, acc ++ [public]}}
+      else
+        {:error, _} = error -> {:halt, error}
+        _ -> {:halt, {:error, :invalid_media_reference}}
+      end
+    end)
+  end
+
+  defp resolve_media_reference(reference, client, opts) do
+    case opaque_media_reference(reference) do
+      nil ->
+        {:ok, reference}
+
+      "whatsapp://media/v1/" <> _ = token when byte_size(token) <= 24_000 ->
+        with {:ok, conn} <- client.resolve_conn(opts) do
+          media_callback(client, :resolve_media_reference, conn, token)
+        end
+
+      _ ->
+        {:error, :invalid_media_reference}
+    end
+  end
+
+  defp opaque_media_reference(reference) when is_binary(reference), do: reference
+
+  defp opaque_media_reference(%{} = reference) do
+    metadata = map_get(reference, [:metadata, "metadata"])
+    metadata = if is_map(metadata), do: metadata, else: %{}
+
+    [map_get(metadata, [:file_id, "file_id"]), map_get(reference, [:url, "url"])]
+    |> Enum.find(fn value -> is_binary(value) and String.starts_with?(value, "whatsapp://media/") end)
+  end
+
+  defp opaque_media_reference(_), do: nil
+
+  defp media_callback(client, operation, conn, value) do
+    if Code.ensure_loaded?(client) and function_exported?(client, operation, 2),
+      do: apply(client, operation, [conn, value]),
+      else: {:error, :media_reference_unsupported}
+  rescue
+    _ -> {:error, :media_reference_unavailable}
+  catch
+    _, _ -> {:error, :media_reference_unavailable}
   end
 
   defp amarula_media(%Amarula.Content.Media{} = media), do: validate_amarula_media(media)

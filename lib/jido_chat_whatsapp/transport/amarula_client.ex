@@ -17,10 +17,42 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
 
   alias Amarula.Protocol.Auth.QRCodeGenerator
   alias Amarula.Protocol.Socket.ConnectionSupervisor
-  alias Jido.Chat.WhatsApp.Transport.GuardedStorage
+  alias Jido.Chat.WhatsApp.Transport.{GuardedStorage, MediaReference}
   alias Jido.Chat.WhatsApp.{AccountIdentity, Message}
 
   @identity_call_timeout 1_000
+
+  @impl true
+  def media_reference(conn, media) do
+    with {:ok, secret, profile} <- media_reference_identity(conn) do
+      MediaReference.seal(media, secret, profile)
+    end
+  end
+
+  @impl true
+  def resolve_media_reference(conn, reference) do
+    with {:ok, secret, profile} <- media_reference_identity(conn) do
+      MediaReference.open(reference, secret, profile)
+    end
+  end
+
+  # Read the stable identity, not evolving Signal session records. The derived
+  # key is used only inside Transport and no new persistence writes are needed.
+  defp media_reference_identity(conn) do
+    with %{profile: profile} when is_atom(profile) or is_binary(profile) <-
+           GenServer.call(conn, :conn, @identity_call_timeout),
+         %{signed_identity_key: %{private: secret}} when is_binary(secret) and byte_size(secret) == 32 <-
+           GenServer.call(conn, :get_auth_creds, @identity_call_timeout),
+         true <- profile not in [nil, ""] do
+      {:ok, secret, to_string(profile)}
+    else
+      _ -> {:error, :media_reference_unavailable}
+    end
+  rescue
+    _ -> {:error, :media_reference_unavailable}
+  catch
+    :exit, _ -> {:error, :media_reference_unavailable}
+  end
 
   @impl true
   def user_phone(conn, jid) when is_binary(jid) do
