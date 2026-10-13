@@ -42,12 +42,35 @@ normalization failures emit the sanitized lifecycle event
 ### Runtime boundaries
 
 `Adapter.listener_child_specs/2` builds the existing `ConnectionWorker` child.
-The host (`jido_messaging`) owns its supervisor, restart policy and shared
-Amarula supervisor. The worker owns ingress translation and its connection
+The host (`jido_messaging`) owns listener supervision and restart policy. The
+package OTP application owns shared transport infrastructure, starting it without
+opening profiles. The worker owns ingress translation and its connection
 lease; Amarula owns sockets, protocol reconnects, decoding and protocol state.
 `Transport` is the only boundary for protocol access. `Message` is a pure
 normalizer; `Pairing` interprets pairing progress, and the host owns UI/policy.
 No agent invocation decisions belong here.
+
+The Amarula transport supervises its shared tree together with a generation
+sentinel using `:one_for_all`. Losing a registry or the connections supervisor
+invalidates the generation and rebuilds all shared infrastructure. The optional
+`Transport.connection_processes/1` callback returns the generation and connection
+owner PIDs monitored by the listener relay. Their loss terminates the listener;
+its host restart policy determines recovery. Protocol children may still restart
+transparently behind the same connection handle. Custom transports that omit the
+callback retain their existing behavior.
+
+Connections wait up to five seconds for a ready generation during startup or
+recovery. `connect/2` does not restart a stopped application. The interactive
+pairing entry point uses `ensure_started/1` to start the package application, never
+a caller-owned shared supervisor. Storage and duplicate-profile contracts remain
+unchanged. A listener stop affects only its own instance and preserves credentials.
+
+Legacy hosts may set `config :jido_chat_whatsapp, start_runtime: false` before
+boot and retain ownership of Amarula infrastructure and its recovery. In that mode
+listeners monitor the host's shared root and their connection owner. Automatic
+package ownership and host ownership must not be enabled together; there is no
+adoption or linking of an existing host tree. Remove the legacy child and the
+setting together when completing migration.
 
 Flow: transport event → worker → message sink. Text uses plain payloads that
 the host normalizes with `Adapter.transform_incoming/1`; media and reactions

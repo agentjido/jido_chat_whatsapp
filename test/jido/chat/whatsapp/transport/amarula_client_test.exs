@@ -1,5 +1,5 @@
 defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
-  use ExUnit.Case, async: false
+  use Jido.Chat.WhatsApp.RuntimeCase, async: false
 
   import ExUnit.CaptureLog
 
@@ -10,11 +10,6 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
       body = Process.get({__MODULE__, :body})
       {request, %Req.Response{status: 200, body: body}}
     end
-  end
-
-  setup_all do
-    start_supervised!(Amarula.Supervisor)
-    :ok
   end
 
   test "resolve_conn/1 handles explicit connections and missing profiles" do

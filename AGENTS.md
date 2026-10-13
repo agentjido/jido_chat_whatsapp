@@ -16,7 +16,8 @@
 - Keep live WhatsApp tests excluded by default with the `:live` tag.
 - Do not commit `.env`, credentials, QR strings, pairing codes, or Amarula profile storage.
 - Prefer `Jido.Chat.Adapter` callbacks for shared behavior.
-- Preserve the adapter boundary; supervised runtime concerns belong in `jido_messaging`.
+- Preserve the adapter boundary: this package owns shared transport infrastructure;
+  hosts such as `jido_messaging` own listener supervision, restart policy and orchestration.
 - Keep the Amarula dependency behind `Jido.Chat.WhatsApp.Transport` so another WhatsApp transport can be added later.
 
 ## Release Hygiene

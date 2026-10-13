@@ -20,6 +20,11 @@ defmodule Jido.Chat.WhatsApp.Transport do
   Configuration includes an isolated `:profile`, optional `:storage` callback
   specification, and `:sync_history` / `:sync_full_history` booleans. See
   `docs/adapter_contracts.md` for lifecycle and custom storage semantics.
+
+  Optional `connection_processes/1` returns the processes defining a connection's
+  lifetime. Their loss terminates the listener so its host can restart it. Include
+  shared runtime generations and connection owners, not protocol children that
+  restart transparently behind a stable handle. Custom transports may omit it.
   """
 
   @type conn :: GenServer.server()
@@ -34,6 +39,7 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @callback user_phone(conn(), String.t()) :: {:ok, String.t() | nil} | {:error, term()}
 
   @callback ensure_started(opts :: keyword()) :: :ok | {:error, term()}
+  @callback connection_processes(conn()) :: {:ok, [pid()]} | {:error, term()}
   @callback connect(config :: map(), opts :: keyword()) :: {:ok, conn()} | {:error, term()}
   @callback stop(conn(), opts :: keyword()) :: :ok | {:error, term()}
   @callback render_qr(qr :: String.t(), opts :: keyword()) ::
@@ -78,6 +84,7 @@ defmodule Jido.Chat.WhatsApp.Transport do
               {:ok, String.t()} | {:error, term()}
 
   @optional_callbacks media_reference: 2,
+                      connection_processes: 1,
                       resolve_media_reference: 2,
                       user_phone: 2,
                       account_identity: 1,

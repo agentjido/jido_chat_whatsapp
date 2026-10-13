@@ -122,15 +122,18 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
 
   @impl true
   def ensure_started(_opts) do
-    case Process.whereis(Amarula.Supervisor) do
-      nil -> start_supervisor()
-      _pid -> :ok
+    with {:ok, _apps} <- Application.ensure_all_started(:jido_chat_whatsapp),
+         {:ok, _pid} <- Jido.Chat.WhatsApp.Transport.AmarulaRuntime.ready() do
+      :ok
+    else
+      _ -> {:error, :runtime_unavailable}
     end
   end
 
   @impl true
   def connect(config, opts) when is_map(config) and is_list(opts) do
     with :ok <- validate_profile(config),
+         {:ok, _pid} <- Jido.Chat.WhatsApp.Transport.AmarulaRuntime.ready(),
          :ok <- load_protocol_modules(),
          {:ok, built} <- build_connection(config, opts),
          {:ok, pid} <-
@@ -332,12 +335,18 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   @impl true
   def request_pairing_code(conn, phone, opts), do: Amarula.request_pairing_code(conn, phone, opts)
 
-  defp start_supervisor do
-    case Amarula.Supervisor.start_link() do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, reason} -> {:error, reason}
+  @impl true
+  def connection_processes({:via, Registry, {Amarula.InstanceRegistry, {instance, :connection}}}) do
+    with {:ok, runtime} <- Jido.Chat.WhatsApp.Transport.AmarulaRuntime.ready(),
+         pid when is_pid(pid) <- GenServer.whereis(ConnectionSupervisor.supervisor_name(instance)) do
+      {:ok, [runtime, pid]}
+    else
+      _ -> {:error, :connection_failed}
     end
+  rescue
+    _ -> {:error, :connection_failed}
+  catch
+    :exit, _ -> {:error, :connection_failed}
   end
 
   defp resolve_profile(profile) do

@@ -1,12 +1,11 @@
 defmodule Jido.Chat.WhatsApp.UserProfileTest do
-  use ExUnit.Case, async: false
+  use Jido.Chat.WhatsApp.RuntimeCase, async: false
 
   alias Amarula.Protocol.Signal.LidMappingFileStore
   alias Jido.Chat.{Adapter, UserInfo}
   alias Jido.Chat.WhatsApp.Adapter, as: WhatsApp
 
   setup do
-    start_supervised!(Amarula.Supervisor)
     {:ok, first} = Amarula.Testing.start_offline(profile: "profile_first")
     {:ok, second} = Amarula.Testing.start_offline(profile: "profile_second")
 

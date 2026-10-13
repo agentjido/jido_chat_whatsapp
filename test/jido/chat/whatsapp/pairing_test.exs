@@ -52,17 +52,13 @@ defmodule Jido.Chat.WhatsApp.PairingTest do
   end
 
   test "the Amarula transport starts or reuses the shared supervisor" do
-    if supervisor = Process.whereis(Amarula.Supervisor) do
-      Supervisor.stop(supervisor)
-    end
-
     assert :ok = AmarulaClient.ensure_started([])
     supervisor = Process.whereis(Amarula.Supervisor)
     assert is_pid(supervisor)
 
     assert :ok = AmarulaClient.ensure_started([])
     assert Process.whereis(Amarula.Supervisor) == supervisor
-    assert :ok = Supervisor.stop(supervisor)
+    assert Process.alive?(supervisor)
   end
 
   test "pairing starts the transport before connect and cleans up on timeout" do

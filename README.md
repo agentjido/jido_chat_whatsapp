@@ -74,11 +74,20 @@ This is the expected mode for `jido_messaging` bridges.
     lifecycle_sink_mfa: {MyApp.WhatsAppStatus, :emit, ["agent_primary"]}
   )
 
-children = [Amarula.Supervisor | specs]
+children = specs
 ```
 
-Start the shared `Amarula.Supervisor` before the generated connection workers.
-Only one shared Amarula supervisor is needed in the host application's supervision tree.
+The `:jido_chat_whatsapp` OTP application starts the shared transport infrastructure
+automatically. Hosts add only the generated listener specs to their supervision
+tree. Application startup opens no profiles or network connections, including on
+nodes without WhatsApp listeners.
+
+When migrating a host that already supervises Amarula, remove that child before
+using the default package-owned runtime. For a staged transition, set
+`config :jido_chat_whatsapp, start_runtime: false` before application startup and
+retain the host's existing infrastructure supervision/recovery. Remove that setting
+when the host wiring is removed. The package never adopts an existing supervisor
+or starts a second owner. This option is a boot-time setting.
 
 The message sink receives chat payloads for `Adapter.transform_incoming/1`.
 Pairing, QR and connection updates go only to the optional `lifecycle_sink_mfa`.
@@ -163,6 +172,11 @@ session storage. `ConnectionWorker.logout/1` explicitly unlinks and clears the
 profile; errors are returned. Duplicate live profile ownership is rejected.
 Protocol reconnect and process restart are handled by Amarula; the host owns
 bounded restart policy for the listener.
+Shared infrastructure failure rebuilds the package transport tree and terminates
+affected listeners so that policy can restart them with fresh attempt identities.
+Startup waits at most five seconds for transport readiness. Stopping a listener
+does not stop the shared runtime or other profiles. Stopping the package application
+stops all its transport connections; stop host listeners first during planned shutdown.
 
 Both history options default to `true`. `sync_history: false` suppresses history
 imports, while `sync_full_history: false` requests a recent window when history

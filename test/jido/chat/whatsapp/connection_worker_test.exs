@@ -67,6 +67,28 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     end
   end
 
+  defmodule UnavailableLifetimeTransport do
+    def connect(config, _opts), do: {:ok, config.test_pid}
+    def connection_processes(_conn), do: {:error, :runtime_unavailable}
+
+    def stop(pid, _opts) do
+      send(pid, :unwatched_connection_cleaned)
+      :ok
+    end
+  end
+
+  test "failure to watch a connection lifetime cleans up the newly opened connection" do
+    assert {:error, :connection_failed} =
+             GenServer.start(ConnectionWorker,
+               bridge_id: "unavailable_lifetime",
+               config: %{profile: "unavailable_lifetime", test_pid: self()},
+               transport: UnavailableLifetimeTransport,
+               sink_mfa: {Sink, :emit, [self()]}
+             )
+
+    assert_receive :unwatched_connection_cleaned
+  end
+
   test "worker death during startup still cleans the eventual connection" do
     test_pid = self()
 

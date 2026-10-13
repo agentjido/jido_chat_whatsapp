@@ -1,5 +1,5 @@
 defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
-  use ExUnit.Case, async: false
+  use Jido.Chat.WhatsApp.RuntimeCase, async: false
   alias Jido.Chat.WhatsApp.Transport.{AmarulaClient, GuardedStorage}
 
   defmodule Store do
@@ -40,7 +40,6 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
   end
 
   setup do
-    start_supervised!(Amarula.Supervisor)
     table = :ets.new(:storage, [:public, :set])
     profile = "storage_#{System.unique_integer([:positive])}"
     config = %{profile: profile, storage: {Store, table: table}, offline: true, connection_state: :connected}

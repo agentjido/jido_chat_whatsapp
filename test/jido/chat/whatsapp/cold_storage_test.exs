@@ -48,6 +48,7 @@ defmodule Jido.Chat.WhatsApp.ColdStorageTest do
     end
 
     [encoded] = System.argv()
+    {:ok, _apps} = Application.ensure_all_started(:jido_chat_whatsapp)
     config = %{profile: "cold_storage_test", storage: {ColdStorage, bytes: Base.decode64!(encoded)}}
     {:error, :connection_failed} = Jido.Chat.WhatsApp.Transport.AmarulaClient.connect(config, [])
     """

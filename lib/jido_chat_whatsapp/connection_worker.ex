@@ -252,13 +252,49 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   # cannot strand resources before the receiver learns which instance it owns.
   defp establish(owner, attempt, state) do
     ref = Process.monitor(owner)
-    result = safe_connect(state)
+    result = connect_and_monitor(state)
     send(owner, {:connection_result, attempt, result})
 
     case result do
       {:ok, conn} -> relay_loop(owner, attempt, ref, {state.transport, conn, state.connect_opts})
       {:error, _} -> :ok
     end
+  end
+
+  defp connect_and_monitor(state) do
+    with {:ok, conn} <- safe_connect(state) do
+      case monitor_connection(state.transport, conn) do
+        :ok ->
+          {:ok, conn}
+
+        {:error, _} ->
+          safe_stop(state.transport, conn, state.connect_opts)
+          {:error, :connection_failed}
+      end
+    end
+  end
+
+  defp monitor_connection(transport, conn) do
+    if function_exported?(transport, :connection_processes, 1) do
+      case transport.connection_processes(conn) do
+        {:ok, processes} when is_list(processes) ->
+          if Enum.all?(processes, &is_pid/1) do
+            Enum.each(processes, &Process.monitor/1)
+            :ok
+          else
+            {:error, :connection_failed}
+          end
+
+        _ ->
+          {:error, :connection_failed}
+      end
+    else
+      :ok
+    end
+  rescue
+    _ -> {:error, :connection_failed}
+  catch
+    _, _ -> {:error, :connection_failed}
   end
 
   defp safe_connect(state) do
@@ -276,6 +312,10 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         relay_loop(owner, attempt, ref, connection)
 
       {:DOWN, ^ref, :process, ^owner, _} ->
+        {transport, conn, opts} = connection
+        safe_stop(transport, conn, opts)
+
+      {:DOWN, _ref, :process, _pid, _reason} ->
         {transport, conn, opts} = connection
         safe_stop(transport, conn, opts)
 
