@@ -110,6 +110,14 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
     end
   end
 
+  @doc "Encodes protocol records for a host batch write using the same format as put/5."
+  @spec encode_records(map()) :: %{{String.t(), String.t()} => String.t()}
+  def encode_records(records) when is_map(records) do
+    Map.new(records, fn {{namespace, key}, value} ->
+      {{to_string(namespace), encode(key)}, encode(value)}
+    end)
+  end
+
   @doc "Lists only the authorized profile after revalidating its binding."
   @spec list_profiles(state()) :: {:ok, [String.t()]} | {:error, term()}
   def list_profiles(state) do

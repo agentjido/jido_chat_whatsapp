@@ -12,6 +12,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   is separate from connection status. `refresh_identity/1` can retrieve a late
   account name without enabling history synchronization. Its deadline defaults
   to 2,500 ms (`:identity_timeout_ms`, allowed range 1..5,000).
+  Managed storage outages pause the connection and retry readiness without
+  terminating the worker or consuming the host supervisor restart budget.
   Lifecycle data is never sent to the chat sink. See `docs/adapter_contracts.md`.
   """
 
@@ -20,6 +22,8 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   alias Jido.Chat.WebhookRequest
   alias Jido.Chat.WhatsApp.{AccountIdentity, Adapter, Message, Pairing}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
+
+  @storage_retry_interval 100
 
   @type sink_mfa :: {module(), atom(), [term()]}
 
@@ -68,15 +72,16 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
     with :ok <- validate_identity_timeout(timeout),
          :ok <- validate_sink(sink),
-         :ok <- validate_optional_sink(lifecycle),
-         {:ok, storage_token} <- watch_storage(config) do
+         :ok <- validate_optional_sink(lifecycle) do
       state = %{
         bridge_id: Keyword.fetch!(opts, :bridge_id),
         sink_mfa: sink,
         lifecycle_sink_mfa: lifecycle,
         sink_opts: Keyword.get(opts, :sink_opts, []),
         transport: Keyword.get(opts, :transport, AmarulaClient),
-        storage_token: storage_token,
+        storage_token: nil,
+        storage_monitor: nil,
+        storage_retry: nil,
         config: config,
         connect_opts: Keyword.get(opts, :connect_opts, []),
         profile: config[:profile] || config["profile"],
@@ -97,7 +102,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         lifecycle_dispatcher: start_dispatcher(lifecycle)
       }
 
-      case connect(state) do
+      case connect_with_storage(state) do
         {:ok, _} = result ->
           result
 
@@ -121,6 +126,9 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
   def handle_call(:refresh_identity, _from, state), do: {:reply, {:error, :not_connected}, state}
 
+  def handle_call(:reconnect, _from, %{storage_retry: ref} = state) when is_reference(ref),
+    do: {:reply, {:error, :storage_unavailable}, state}
+
   def handle_call(:reconnect, _from, state) do
     state = clear_identity(state)
 
@@ -136,6 +144,9 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         {:reply, {:error, :connection_failed}, state}
     end
   end
+
+  def handle_call(:logout, _from, %{storage_retry: ref} = state) when is_reference(ref),
+    do: {:reply, {:error, :storage_unavailable}, state}
 
   def handle_call(:logout, _from, state) do
     state = clear_identity(state)
@@ -178,6 +189,9 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     cond do
       is_nil(state.conn) ->
         {:noreply, state}
+
+      not storage_healthy?(state.storage_token) ->
+        {:noreply, wait_for_storage(state)}
 
       healthy?(state) ->
         {:noreply, handle_event(event, data, state)}
@@ -227,16 +241,77 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     {:noreply, state}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _}, %{relay_monitor: ref} = state),
-    do: {:stop, :transport_receiver_failed, state}
+  def handle_info({:DOWN, ref, :process, _pid, _}, %{relay_monitor: ref} = state) do
+    if storage_healthy?(state.storage_token),
+      do: {:stop, :transport_receiver_failed, state},
+      else: {:noreply, wait_for_storage(state)}
+  end
 
   def handle_info({:whatsapp_storage_down, token}, %{storage_token: token} = state),
-    do: {:stop, :storage_unavailable, state}
+    do: {:noreply, wait_for_storage(state)}
 
   def handle_info({:DOWN, _, :process, pid, _}, %{storage_token: {pid, _}} = state),
-    do: {:stop, :storage_unavailable, state}
+    do: {:noreply, wait_for_storage(state)}
+
+  def handle_info({:retry_storage, token}, %{storage_retry: token} = state) do
+    case connect_with_storage(%{state | storage_retry: nil}) do
+      {:ok, next} -> {:noreply, next}
+      {:stop, _} -> {:noreply, wait_for_storage(state)}
+    end
+  end
 
   def handle_info(_, state), do: {:noreply, state}
+
+  defp connect_with_storage(state) do
+    case watch_storage(state.config) do
+      {:ok, token, monitor} ->
+        attempt = if state.status == :failed, do: make_ref(), else: state.attempt_id
+        next = %{state | storage_token: token, storage_monitor: monitor, status: :connecting, attempt_id: attempt}
+        if state.status == :failed, do: notify(next, :connecting)
+
+        case connect(next) do
+          {:ok, _} = result ->
+            result
+
+          error ->
+            if monitor, do: Process.demonitor(monitor, [:flush])
+            error
+        end
+
+      {:error, :storage_unavailable} ->
+        {:ok, wait_for_storage(state)}
+    end
+  end
+
+  defp wait_for_storage(%{status: :failed, conn: nil, storage_token: nil} = state),
+    do: schedule_storage_retry(state)
+
+  defp wait_for_storage(state) do
+    stop_connection(state)
+    if state.storage_monitor, do: Process.demonitor(state.storage_monitor, [:flush])
+
+    next = %{
+      (state
+       |> clear_qr()
+       |> clear_identity())
+      | storage_token: nil,
+        storage_monitor: nil,
+        conn: nil,
+        relay: nil,
+        relay_monitor: nil,
+        qr_count: 0,
+        status: :failed
+    }
+
+    notify(next, :storage_unavailable)
+    schedule_storage_retry(next)
+  end
+
+  defp schedule_storage_retry(state) do
+    token = make_ref()
+    Process.send_after(self(), {:retry_storage, token}, @storage_retry_interval)
+    %{state | storage_retry: token}
+  end
 
   defp connect(state) do
     owner = self()
@@ -343,12 +418,11 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   defp watch_storage(%{storage: {module, _}})
        when module in [Jido.Chat.WhatsApp.Storage.Split, Jido.Chat.WhatsApp.Storage.Mnesia] do
     with {:ok, {pid, _} = token} <- Jido.Chat.WhatsApp.Storage.Mnesia.watch() do
-      Process.monitor(pid)
-      {:ok, token}
+      {:ok, token, Process.monitor(pid)}
     end
   end
 
-  defp watch_storage(_), do: {:ok, nil}
+  defp watch_storage(_), do: {:ok, nil, nil}
 
   defp stop_connection(state) do
     result = if state.conn, do: safe_stop(state.transport, state.conn, state.connect_opts), else: :ok

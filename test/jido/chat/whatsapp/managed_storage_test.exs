@@ -49,13 +49,37 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
     assert {:ok, "value"} = Mnesia.get(fresh, "one", :session, "key")
   end
 
-  test "backend loss invalidates only managed listeners" do
+  test "backend loss pauses only managed connections and recovers without worker restart" do
     managed = worker(:managed, {Mnesia, scope: :managed})
     other = worker(:other, nil)
-    ref = Process.monitor(managed)
+    assert_receive {:connected, "managed", old_connection}
+    %{attempt_id: old_attempt} = ConnectionWorker.status(managed)
     stop_supervised!(Mnesia)
-    assert_receive {:DOWN, ^ref, :process, ^managed, :storage_unavailable}
+    assert_receive {:lifecycle, %{profile: "managed", status: :failed, qr: nil}}
+    assert %{status: :failed} = ConnectionWorker.status(managed)
     assert Process.alive?(other)
+    assert {:error, :storage_unavailable} = ConnectionWorker.logout(managed)
+    refute_receive {:connected, "managed", _}, 250
+    start_supervised!({Mnesia, max_value_bytes: 64, max_scope_bytes: 200})
+    assert_receive {:connected, "managed", connection}, 1_000
+    refute connection == old_connection
+    assert Process.alive?(managed)
+    send(connection, {:amarula, :connection_update, %{qr: "fresh"}})
+    assert_receive {:lifecycle, %{profile: "managed", status: :pairing, qr: "fresh"}}
+    send(managed, {:transport_event, old_attempt, :connection_update, %{qr: "stale"}})
+    assert %{qr: "fresh", attempt_id: attempt} = ConnectionWorker.status(managed)
+    refute attempt == old_attempt
+  end
+
+  test "starting while storage is absent stays responsive and connects when ready" do
+    stop_supervised!(Mnesia)
+    managed = worker(:late, {Mnesia, scope: :late})
+    assert %{status: :failed} = ConnectionWorker.status(managed)
+    assert {:error, :storage_unavailable} = ConnectionWorker.reconnect(managed)
+    refute_receive {:connected, "late", _}, 250
+    start_supervised!({Mnesia, max_value_bytes: 64, max_scope_bytes: 200})
+    assert_receive {:connected, "late", _}, 1_000
+    assert Process.alive?(managed)
   end
 
   test "literal match-pattern atoms cannot clear another host scope" do
@@ -108,7 +132,12 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
     assert output =~ "HOST_SCHEMA_PRESERVED"
   end
 
-  def connect(_, _), do: {:ok, self()}
+  def connect(config, _) do
+    send(config.observer, {:connected, config.profile, self()})
+    {:ok, self()}
+  end
+
+  def lifecycle(observer, payload, _), do: send(observer, {:lifecycle, payload})
   def stop(_, _), do: :ok
   def sink(_, _), do: :ok
 
@@ -118,7 +147,8 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
        bridge_id: to_string(id),
        transport: __MODULE__,
        sink_mfa: {__MODULE__, :sink, []},
-       config: %{profile: to_string(id), storage: storage}},
+       lifecycle_sink_mfa: {__MODULE__, :lifecycle, [self()]},
+       config: %{profile: to_string(id), storage: storage, observer: self()}},
       id: id,
       restart: :temporary
     )

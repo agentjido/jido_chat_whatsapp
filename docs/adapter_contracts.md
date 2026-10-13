@@ -238,8 +238,11 @@ table strictly local RAM. This is not a replicated/quorum store.
 `{:error, :storage_unavailable}`. Startup is separate from readiness: unavailable
 tables are reconciled, operations fail closed, and old handles cannot recover by
 silently attaching to a new generation. Managed listeners are notified/monitored
-and terminate on storage loss so their host supervisor can restart them. Backend
-replacement preserves live tables and does not restart unrelated listeners.
+and pause connections on storage loss. Workers remain responsive and retry
+readiness every 100 ms, including when started during an outage, without consuming
+the host supervisor restart budget. Recovery creates a fresh connection and storage
+handle; stale attempts cannot deliver messages. Backend replacement preserves live
+tables and does not restart unrelated listeners.
 Mnesia/node restart loses RAM records. Shutdown never stops shared Mnesia or
 deletes its tables. Pairing credentials should remain in host durable storage.
 
