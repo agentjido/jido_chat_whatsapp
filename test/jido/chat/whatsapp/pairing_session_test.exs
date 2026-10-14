@@ -32,6 +32,7 @@ defmodule Jido.Chat.WhatsApp.PairingSessionTest do
     assert {:ok, %{saved: saved}} = command(session, :confirm)
     refute saved.runtime_pending
     assert {:ok, %{saved: ^saved}} = command(session, :confirm)
+    assert {:ok, %{saved: ^saved}} = command(session, :retry)
     assert Agent.get(host, &{&1.saves, &1.starts}) == {1, 1}
     durable = Agent.get(host, & &1.records)
     assert durable == %{{"creds", :self} => %{paired: true}}

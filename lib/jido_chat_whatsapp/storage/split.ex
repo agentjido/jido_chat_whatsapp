@@ -12,6 +12,9 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
   `:volatile_namespaces` defaults to session and sender_key. Durable values
   retain Base64-encoded uncompressed Erlang terms for compatible host storage.
   The host owns encryption/transactions; this module owns routing and encoding.
+
+  Shared authentication uses `binding_options/2` to translate opaque host bindings
+  into this backend; generic host callers need not construct Split options.
   """
 
   alias Jido.Chat.WhatsApp.Storage.Mnesia
@@ -19,6 +22,22 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
   @volatile_namespaces ["session", "sender_key"]
 
   @type state :: map()
+
+  @doc "Builds stable storage options; host document callbacks authorize the opaque binding on every access."
+  @spec binding_options(term(), keyword()) :: keyword()
+  def binding_options(binding, opts) when not is_nil(binding) do
+    {module, function, args} = Keyword.fetch!(opts, :document_mfa)
+    context = Keyword.fetch!(opts, :context)
+    digest = :crypto.hash(:sha256, :erlang.term_to_binary(binding, [:deterministic])) |> Base.encode16(case: :lower)
+
+    [
+      profile: "jido_chat_whatsapp_" <> digest,
+      scope: {:whatsapp, binding},
+      context: binding,
+      document_mfa: {module, function, args ++ [context]},
+      volatile_namespaces: Keyword.get(opts, :volatile_namespaces, @volatile_namespaces)
+    ]
+  end
 
   @doc "Creates a callback context; it has no transient protocol state."
   @spec new(keyword()) :: state()

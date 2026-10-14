@@ -194,6 +194,19 @@ ID if history and live delivery overlap.
 
 ## Pairing
 
+For host-driven onboarding, discover `:authenticate` using
+`Jido.Chat.Adapter.capabilities(Jido.Chat.WhatsApp.Adapter)` and call
+`Jido.Chat.Adapter.authenticate/4`. Begin returns pending; poll the opaque session
+for a QR challenge and authenticated account, then explicitly confirm its
+`external_id`. Retry preserves the live session and linked credentials.
+
+Trusted host callbacks receive package-encoded credentials and return an opaque
+binding. The package prepares storage options, seeds volatile state, and invokes
+the host's existing activation callback. `runtime_pending: true` still means the
+connector is saved. The legacy `PairingSession.execute/3` API remains compatible.
+See [shared authentication and host handoff](docs/adapter_contracts.md#shared-authentication-capability-work-9ya)
+for callback shapes and migration details.
+
 This adapter ships a QR-only pairing task that creates the Amarula profile:
 
 ```bash

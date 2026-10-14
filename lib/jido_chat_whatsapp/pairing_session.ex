@@ -19,6 +19,11 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   Receipt fields are public; snapshots and host context never enter status.
   Callbacks are bounded to ten seconds and the remaining pairing lifetime.
   A timed-out durable callback may have committed: retry the same attempt ID.
+
+  `authenticate/3` adapts the shared contract to this same session machinery.
+  Shared persistence receives normalized account/encoded credentials and returns
+  an opaque binding. Storage conversion and seeding remain package-owned; legacy
+  `execute/3` callbacks and results retain their existing shapes.
   """
   use GenServer, restart: :temporary
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker, Pairing}
@@ -47,12 +52,52 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
 
   def execute(%{op: op, session: pid}, owner_id, _opts)
       when is_pid(pid) and not is_nil(owner_id) and op in [:status, :retry, :cancel, :confirm] do
-    GenServer.call(pid, {owner_id, op}, 30_000)
+    GenServer.call(pid, {owner_id, op}, 40_000)
   catch
     :exit, _ -> {:error, :pairing_expired}
   end
 
   def execute(_, _, _), do: {:error, :invalid_request}
+
+  @doc "Translates the shared adapter contract without creating a separate pairing runtime."
+  @spec authenticate(map(), term(), keyword()) :: Jido.Chat.Adapter.authentication_result()
+  def authenticate(request, owner_id, opts)
+
+  def authenticate(%{op: :begin}, owner_id, opts) when not is_nil(owner_id) do
+    request = %{op: :begin, owner: opts[:owner]}
+
+    case execute(request, owner_id, Keyword.put(opts, :contract, :shared)) do
+      {:ok, %{session: session} = status} -> {:ok, Pairing.authentication_presentation(status, session)}
+      _ -> {:error, :pairing_unavailable}
+    end
+  rescue
+    _ -> {:error, :pairing_unavailable}
+  catch
+    _, _ -> {:error, :pairing_unavailable}
+  end
+
+  def authenticate(%{op: op, session: session} = request, owner_id, _opts)
+      when is_pid(session) and not is_nil(owner_id) and op in [:status, :retry, :confirm, :cancel] do
+    operation = if op == :confirm, do: {:confirm, request[:account_id]}, else: op
+
+    case GenServer.call(session, {owner_id, operation}, 40_000) do
+      {:ok, status} ->
+        {:ok, Pairing.authentication_presentation(status, session)}
+
+      :ok when op == :cancel ->
+        {:ok, %{phase: :cancelled, session: session}}
+
+      {:error, reason} when reason in [:unauthorized, :identity_changed, :identity_not_ready, :save_failed] ->
+        {:error, reason}
+
+      _ ->
+        {:error, :pairing_unavailable}
+    end
+  catch
+    :exit, _ -> {:error, :pairing_expired}
+  end
+
+  def authenticate(_, _, _), do: {:error, :invalid_request}
 
   @doc "Provisional devices cannot enter the agent message path."
   @spec discard_message(term(), keyword()) :: :ok
@@ -77,6 +122,8 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
       context: Keyword.fetch!(opts, :context),
       persist_mfa: Keyword.fetch!(opts, :persist_mfa),
       start_mfa: Keyword.fetch!(opts, :start_mfa),
+      contract: Keyword.get(opts, :contract, :legacy),
+      document_mfa: Keyword.get(opts, :document_mfa),
       adapter: Keyword.get(opts, :adapter, Adapter),
       transport: Keyword.get(opts, :transport, Jido.Chat.WhatsApp.Transport.AmarulaClient),
       connect_opts: Keyword.get(opts, :connect_opts, []),
@@ -112,15 +159,23 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
 
   def handle_call({_, :cancel}, _, state), do: {:stop, :normal, :ok, state}
 
-  def handle_call({_, :confirm}, _, %{saved: saved} = state) when not is_nil(saved),
-    do: {:reply, {:ok, %{saved: saved, phase: :saved}}, state}
-
-  def handle_call({_, :confirm}, _, state) do
-    case freeze(state) do
-      {:ok, frozen} -> persist(frozen)
-      {:error, reason} -> {:reply, {:error, reason}, state}
+  def handle_call({_, {:confirm, account_id}}, _, %{contract: :shared} = state) do
+    case presentation(state) do
+      %{phase: :saved} -> confirm(state)
+      %{phase: :confirm, identity: %{phone_number: ^account_id}} when is_binary(account_id) -> confirm(state)
+      %{phase: :confirm} -> {:reply, {:error, :identity_changed}, state}
+      _ -> {:reply, {:error, :identity_not_ready}, state}
     end
   end
+
+  def handle_call({_, :confirm}, _, %{contract: :legacy} = state), do: confirm(state)
+
+  def handle_call({_, :confirm}, _, state), do: {:reply, {:error, :invalid_request}, state}
+
+  def handle_call({_, {:confirm, _}}, _, state), do: {:reply, {:error, :invalid_request}, state}
+
+  def handle_call({_, :retry}, _, %{saved: saved} = state) when not is_nil(saved),
+    do: {:reply, {:ok, presentation(state)}, state}
 
   def handle_call({_, :retry}, _, %{snapshot: snapshot} = state) when not is_nil(snapshot),
     do: {:reply, {:ok, presentation(state)}, state}
@@ -233,6 +288,16 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
     end
   end
 
+  defp confirm(%{saved: saved} = state) when not is_nil(saved),
+    do: {:reply, {:ok, %{saved: saved, phase: :saved}}, state}
+
+  defp confirm(state) do
+    case freeze(state) do
+      {:ok, frozen} -> persist(frozen)
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   defp freeze(%{snapshot: snapshot} = state) when not is_nil(snapshot), do: {:ok, state}
 
   defp freeze(state) do
@@ -273,28 +338,55 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   end
 
   defp persist(state) do
-    request = %{
-      attempt_id: state.id,
-      identity: state.identity,
-      records: Split.durable_records(state.snapshot, state.namespaces)
-    }
+    request = persistence_request(state)
 
     case callback(state.persist_mfa, [state.context, request], state.deadline) do
-      {:ok, %{receipt: receipt, storage: storage_opts, runtime: runtime}}
-      when is_map(receipt) and is_list(storage_opts) ->
-        result = handoff(state, storage_opts, runtime)
+      {:ok, %{receipt: receipt} = result} when state.contract == :shared and is_map(receipt) ->
+        saved(state, Pairing.public_receipt(receipt), shared_handoff(state, result))
 
-        :ok = Temporary.discard(state.storage)
-        saved = Map.put(receipt, :runtime_pending, result != :ok)
-        {:reply, {:ok, %{phase: :saved, saved: saved}}, %{state | saved: saved, snapshot: nil}}
+      {:ok, %{receipt: receipt, storage: storage_opts, runtime: runtime}}
+      when state.contract == :legacy and is_map(receipt) and is_list(storage_opts) ->
+        saved(state, receipt, handoff(state, storage_opts, runtime))
 
       _ ->
         {:reply, {:error, :save_failed}, state}
     end
   end
 
+  defp persistence_request(state) do
+    records = Split.durable_records(state.snapshot, state.namespaces)
+
+    if state.contract == :shared do
+      %{attempt_id: state.id, account: Pairing.account(state.identity), credentials: Split.encode_records(records)}
+    else
+      %{attempt_id: state.id, identity: state.identity, records: records}
+    end
+  end
+
+  defp saved(state, receipt, result) do
+    :ok = Temporary.discard(state.storage)
+    saved = Map.put(receipt, :runtime_pending, result != :ok)
+    {:reply, {:ok, %{phase: :saved, saved: saved}}, %{state | saved: saved, snapshot: nil}}
+  end
+
+  defp shared_handoff(state, %{binding: binding, runtime: runtime}) when not is_nil(binding) do
+    config =
+      Adapter.connection_options(binding,
+        context: state.context,
+        document_mfa: state.document_mfa,
+        volatile_namespaces: state.namespaces
+      )
+
+    {Split, storage_opts} = config.storage
+    handoff(state, storage_opts, %{binding: binding, runtime: runtime, connection_options: config})
+  rescue
+    _ -> {:error, :runtime_unavailable}
+  end
+
+  defp shared_handoff(_, _), do: {:error, :runtime_unavailable}
+
   defp handoff(state, storage_opts, runtime) do
-    with :ok <- Split.seed(Split.new(storage_opts), state.snapshot),
+    with :ok <- bounded(fn -> Split.seed(Split.new(storage_opts), state.snapshot) end, state.deadline),
          do: callback(state.start_mfa, [state.context, runtime], state.deadline)
   rescue
     _ -> {:error, :runtime_unavailable}
@@ -303,12 +395,20 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   end
 
   defp callback({module, function, args}, values, deadline) do
+    bounded(fn -> apply(module, function, args ++ values) end, deadline)
+  end
+
+  defp bounded(fun, deadline) do
     timeout = min(10_000, max(0, deadline - System.monotonic_time(:millisecond)))
 
+    if timeout == 0, do: {:error, :callback_failed}, else: run_callback(fun, timeout)
+  end
+
+  defp run_callback(fun, timeout) do
     task =
       Task.async(fn ->
         try do
-          apply(module, function, args ++ values)
+          fun.()
         rescue
           _ -> {:error, :callback_failed}
         catch
@@ -332,6 +432,7 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
     Keyword.keyword?(opts) and is_pid(opts[:owner]) and not is_nil(opts[:owner_id]) and
       is_binary(opts[:attempt_id]) and byte_size(opts[:attempt_id]) in 1..128 and
       Keyword.has_key?(opts, :context) and valid_callback?(opts[:persist_mfa]) and
+      (Keyword.get(opts, :contract, :legacy) == :legacy or valid_callback?(opts[:document_mfa])) and
       valid_callback?(opts[:start_mfa]) and is_integer(Keyword.get(opts, :ttl_ms, 180_000)) and
       Keyword.get(opts, :ttl_ms, 180_000) in 1..600_000
   end

@@ -574,3 +574,55 @@ Raw lifecycle status/profile/source/attempt metadata is unchanged; worker `statu
 remains a plain snapshot. Hosts consume the supplied presentation and retain
 their own source fencing and runtime-loss handling rather than remapping provider
 states or duplicating provider messages. QR appears only during pairing.
+
+## Shared authentication capability (work-9ya)
+
+The optional `:authenticate` capability uses `Jido.Chat.Adapter.authenticate/4`.
+See the core `guides/authentication.md` for the provider-neutral schema. WhatsApp
+implements it through the existing `PairingSession`; `execute/3` and its legacy
+`identity/records`, `storage/runtime`, PID handles and status shapes stay supported.
+The shared path opts into translation, not another session runtime.
+
+Begin trusted options are `:supervisor`, `:owner` (monitored PID), `:attempt_id`,
+`:context`, `:persist_mfa`, `:start_mfa`, and `:document_mfa`; transport/connect
+options and bounded `:ttl_ms` retain their existing meaning. `:document_mfa`
+receives configured arguments followed by `(context, binding, request)` and must
+validate the binding on every operation, including `__binding_check__` before
+volatile seeding/access. The binding is a stable opaque host term, not nil.
+The package derives a stable profile and RAM scope from it and prepares the Split
+backend. Hosts use `Adapter.connection_options(binding, trusted_opts)` for saved
+startup, passing the result as their listener ingress config; no Split construction
+or record encoding belongs in generic host pairing code.
+
+Persistence receives normalized `account` and already encoded `credentials`.
+Activation receives the opaque `runtime`, `binding` and prepared
+`connection_options`. A receipt is retained even if binding validation/seeding or
+activation fails. Only allowlisted receipt fields reach shared status. The old
+host callbacks are unchanged and still receive unencoded `records` and return
+concrete `storage` options until that host migrates. Lifecycle delivery continues
+on the single `sink_mfa` using existing connection_update ActionEvents.
+
+### Host activation example
+
+```elixir
+# In the trusted start_mfa callback, after host authorization:
+# payload = %{binding: binding, runtime: saved_config, connection_options: options}
+ingress = Map.merge(payload.connection_options, %{mode: :linked_device})
+# Feed ingress into the host's existing saved-listener startup/sync operation.
+# Adapter.listener_child_specs(saved_id, ingress: ingress, sink_mfa: existing_sink)
+```
+
+The options' `profile` and `storage` belong at the ingress top level. Preserve
+both unchanged. The opaque binding must remain stable across host restarts (use
+persistent tenant/configuration/credential IDs, not process IDs or transient
+actor context). `connection_options/2` deterministically reconstructs the same
+profile and scope. The document callback must reject revoked or mismatched
+bindings; a non-nil binding alone is not authorization. Encoded credentials retain
+the existing tuple-keyed map format for BEAM dispatch; they are not JSON records.
+
+Seeding's host binding check is also bounded to ten seconds and remaining session
+lifetime. No new callback starts after that lifetime has elapsed. A shared confirm
+call permits up to forty seconds for the bounded persistence, seed and activation
+stages to finish and return the durable receipt. If the whole session expires
+after an uncertain save, the host must reconcile the original attempt ID through
+its durable idempotency record before starting another onboarding attempt.

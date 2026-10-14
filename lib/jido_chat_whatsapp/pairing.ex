@@ -5,6 +5,48 @@ defmodule Jido.Chat.WhatsApp.Pairing do
 
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
+  @doc "Normalizes an authenticated account without protocol identifiers or provider data."
+  @spec account(map()) :: map()
+  def account(%{phone_number: phone} = identity),
+    do: %{external_id: phone, display_name: safe_name(identity[:display_name])}
+
+  @doc "Projects legacy pairing progress into the shared authentication contract."
+  @spec authentication_presentation(map(), term()) :: map()
+  def authentication_presentation(status, session) do
+    base = Map.take(status, [:summary]) |> Map.put(:session, session)
+
+    case status do
+      %{phase: :confirm, identity: identity} ->
+        Map.merge(base, %{phase: :authenticated, account: account(identity)})
+
+      %{phase: :pairing, qr: qr} when is_binary(qr) ->
+        Map.merge(base, %{phase: :challenge, challenge: %{type: :qr, value: qr, expires_at: nil}})
+
+      %{phase: :saved, saved: saved} ->
+        Map.merge(base, %{phase: :saved, receipt: public_receipt(saved), runtime_pending: saved.runtime_pending})
+
+      %{phase: phase} when phase in [:failed, :expired, :disconnected] ->
+        Map.put(base, :phase, :failed)
+
+      _ ->
+        Map.put(base, :phase, :pending)
+    end
+  end
+
+  @doc "Allows only public scalar receipt fields from a trusted persistence result."
+  @spec public_receipt(map()) :: map()
+  def public_receipt(receipt) do
+    receipt
+    |> Map.take([:id, :name])
+    |> Map.filter(fn
+      {:id, value} -> is_binary(value) or is_integer(value)
+      {:name, value} -> is_binary(value)
+    end)
+  end
+
+  defp safe_name(name) when is_binary(name), do: name
+  defp safe_name(_), do: nil
+
   @doc "Classifies lifecycle progress without retaining provider error or credential data."
   @spec lifecycle_status(atom(), term()) :: atom() | nil
   def lifecycle_status(:connection_update, %{connection: :open}), do: :connected

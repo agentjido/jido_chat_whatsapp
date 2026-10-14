@@ -1,6 +1,9 @@
 defmodule Jido.Chat.WhatsApp.Adapter do
   @moduledoc """
   WhatsApp `Jido.Chat.Adapter` implementation using Amarula.
+
+  Optional shared authentication delegates to the existing provisional pairing
+  session. Host bindings are converted to transport options inside this package.
   """
 
   use Jido.Chat.Adapter
@@ -18,7 +21,8 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     WebhookResponse
   }
 
-  alias Jido.Chat.WhatsApp.{ConnectionWorker, Message, SendOptions}
+  alias Jido.Chat.WhatsApp.{ConnectionWorker, Message, PairingSession, SendOptions}
+  alias Jido.Chat.WhatsApp.Storage.Split
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   @media_type_pattern ~r/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/
@@ -30,6 +34,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   @spec capabilities() :: map()
   def capabilities,
     do: %{
+      authenticate: :native,
       initialize: :fallback,
       shutdown: :fallback,
       send_message: :native,
@@ -57,6 +62,18 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       parse_event: :native,
       format_webhook_response: :native
     }
+
+  @doc "Runs shared owner-scoped authentication using trusted host callbacks."
+  @impl true
+  @spec authenticate(map(), term(), keyword()) :: Jido.Chat.Adapter.authentication_result()
+  def authenticate(request, owner_id, opts), do: PairingSession.authenticate(request, owner_id, opts)
+
+  @doc "Prepares saved transport configuration from an opaque binding and trusted document callback."
+  @spec connection_options(term(), keyword()) :: map()
+  def connection_options(binding, opts) do
+    storage = Split.binding_options(binding, opts)
+    %{profile: Keyword.fetch!(storage, :profile), storage: {Split, storage}}
+  end
 
   @impl true
   def listener_child_specs(bridge_id, opts \\ []) when is_binary(bridge_id) and is_list(opts) do
