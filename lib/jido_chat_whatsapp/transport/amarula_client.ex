@@ -173,6 +173,21 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   end
 
   @impl true
+  def recovery_status(conn) do
+    # Amarula schedules retries while disconnected and moves to :closed when
+    # its retry budget is exhausted. A progressing handshake can already be
+    # :connected internally; only the subsequent :open event authenticates it.
+    case GenServer.call(conn, :get_connection_state, @identity_call_timeout) do
+      state when state in [:disconnected, :connecting, :connected] -> :reconnecting
+      _ -> :failed
+    end
+  rescue
+    _ -> :failed
+  catch
+    _, _ -> :failed
+  end
+
+  @impl true
   def health(conn) do
     case Amarula.Connection.get_conn(conn).storage do
       %{adapter: GuardedStorage, state: state} ->

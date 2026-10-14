@@ -6,6 +6,11 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
   alias Amarula.Protocol.Proto
 
   defmodule Sink do
+    def emit(test_pid, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: metadata}}, opts) do
+      send(test_pid, {:sink_emit, metadata, opts})
+      :ok
+    end
+
     def emit(test_pid, payload, opts) do
       send(test_pid, {:sink_emit, payload, opts})
       {:ok, :accepted}
@@ -117,7 +122,6 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     opts = [
       bridge_id: profile,
       sink_mfa: {Sink, :emit, [self()]},
-      lifecycle_sink_mfa: {Sink, :emit, [self()]},
       transport: MockTransport,
       config: %{profile: profile, test_pid: self(), qr_timeout: qr_timeout}
     ]
@@ -294,14 +298,19 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     assert %{status: :pairing, qr: "other-profile"} = ConnectionWorker.status(other)
   end
 
-  test "omitting lifecycle sink never leaks controls into chat and profiles are isolated" do
-    {pid, parent, profile} = worker(lifecycle_sink_mfa: nil)
-    {other, other_parent, other_profile} = worker(lifecycle_sink_mfa: nil)
+  test "single sink delivers sanitized lifecycle and profiles remain isolated" do
+    {pid, parent, profile} = worker()
+    {other, other_parent, other_profile} = worker()
 
     for target <- [parent, other_parent] do
       send(target, {:amarula, :connection_update, %{qr: "secret"}})
       send(target, {:amarula, :pairing_code, %{code: "secret"}})
       send(target, {:amarula, :error, "secret"})
+    end
+
+    for expected <- [profile, other_profile] do
+      assert_receive {:sink_emit, %{category: :connection_lifecycle, profile: ^expected, event: :qr_available}, _}
+      assert_receive {:sink_emit, %{category: :connection_lifecycle, profile: ^expected, event: :error, qr: nil}, _}
     end
 
     refute_receive {:sink_emit, _, _}

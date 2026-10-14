@@ -137,7 +137,9 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
     {:ok, self()}
   end
 
-  def lifecycle(observer, payload, _), do: send(observer, {:lifecycle, payload})
+  def lifecycle(observer, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: payload}}, _),
+    do: send(observer, {:lifecycle, payload})
+
   def stop(_, _), do: :ok
   def sink(_, _), do: :ok
 
@@ -146,8 +148,7 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
       {ConnectionWorker,
        bridge_id: to_string(id),
        transport: __MODULE__,
-       sink_mfa: {__MODULE__, :sink, []},
-       lifecycle_sink_mfa: {__MODULE__, :lifecycle, [self()]},
+       sink_mfa: {__MODULE__, :lifecycle, [self()]},
        config: %{profile: to_string(id), storage: storage, observer: self()}},
       id: id,
       restart: :temporary

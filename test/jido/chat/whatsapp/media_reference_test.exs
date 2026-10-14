@@ -193,7 +193,6 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
       {ConnectionWorker,
        bridge_id: "broken-media",
        sink_mfa: {Sink, :emit, [self()]},
-       lifecycle_sink_mfa: {Sink, :emit, [self()]},
        transport: Transport,
        config: %{profile: "broken", conn: conn, test_pid: self()}}
     )
@@ -210,7 +209,12 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
     }
 
     send(receiver, {:amarula, :messages_upsert, %{messages: [message]}})
-    assert_receive {:ingress, %{event: :ingress_normalization_failed} = event}, 1_000
+
+    assert_receive {:ingress,
+                    %EventEnvelope{event_type: :action, payload: %{metadata: %{event: :ingress_normalization_failed}}} =
+                      event},
+                   1_000
+
     refute inspect(event) =~ "media_key"
     refute_receive {:ingress, %EventEnvelope{}}
     refute_receive {:ingress, %{type: :media}}

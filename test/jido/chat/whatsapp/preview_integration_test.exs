@@ -81,6 +81,16 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
   end
 
   defmodule ReplySink do
+    def emit(test_pid, %Jido.Chat.EventEnvelope{} = envelope, _opts) do
+      chat =
+        Jido.Chat.new(adapters: %{whatsapp: Adapter})
+        |> Jido.Chat.on_action("connection_update", fn action ->
+          send(test_pid, {:lifecycle_action, action})
+        end)
+
+      Jido.Chat.route_event(chat, :whatsapp, envelope)
+    end
+
     def emit(test_pid, payload, opts) do
       with {:ok, %Incoming{} = incoming} <- Adapter.transform_incoming(payload),
            {:ok, response} <-
@@ -108,6 +118,9 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
       )
 
     assert_receive {:transport_connected, parent}
+    send(parent, {:amarula, :connection_update, %{connection: :open}})
+    assert_receive {:lifecycle_action, %Jido.Chat.ActionEvent{metadata: %{status: :connected}}}
+    refute_received {:reply_sent, _, _, _}
 
     incoming_message = %Msg{
       id: "wamid.inbound",

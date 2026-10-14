@@ -4,9 +4,9 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
   `sink_mfa` receives chat payloads and normalized media/reaction event envelopes.
   Media envelopes carry opaque references, never private download descriptors.
-  Optional `lifecycle_sink_mfa` receives
-  sanitized profile/attempt-correlated status maps (including sensitive QR data).
-  Both callbacks receive their base arguments followed by `[payload, opts]`.
+  The same sink receives sanitized lifecycle ActionEvent envelopes, including
+  sensitive QR data, with profile/attempt/source correlation. The callback
+  receives its base arguments followed by `[payload, opts]`.
   Lifecycle callbacks run in order outside the worker and may query its status.
   Identity is fetched asynchronously after socket open and cached; availability
   is separate from connection status. `refresh_identity/1` can retrieve a late
@@ -14,12 +14,12 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   to 2,500 ms (`:identity_timeout_ms`, allowed range 1..5,000).
   Managed storage outages pause the connection and retry readiness without
   terminating the worker or consuming the host supervisor restart budget.
-  Lifecycle data is never sent to the chat sink. See `docs/adapter_contracts.md`.
+  Lifecycle actions never become chat messages. See `docs/adapter_contracts.md`.
   """
 
   use GenServer
 
-  alias Jido.Chat.WebhookRequest
+  alias Jido.Chat.{ActionEvent, EventEnvelope, WebhookRequest}
   alias Jido.Chat.WhatsApp.{AccountIdentity, Adapter, Message, Pairing}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
@@ -65,18 +65,15 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   def init(opts) do
     Process.flag(:trap_exit, true)
     sink = Keyword.fetch!(opts, :sink_mfa)
-    lifecycle = Keyword.get(opts, :lifecycle_sink_mfa)
     config = Keyword.fetch!(opts, :config)
 
     timeout = Keyword.get(opts, :identity_timeout_ms, 2_500)
 
     with :ok <- validate_identity_timeout(timeout),
-         :ok <- validate_sink(sink),
-         :ok <- validate_optional_sink(lifecycle) do
+         :ok <- validate_sink(sink) do
       state = %{
         bridge_id: Keyword.fetch!(opts, :bridge_id),
         sink_mfa: sink,
-        lifecycle_sink_mfa: lifecycle,
         sink_opts: Keyword.get(opts, :sink_opts, []),
         transport: Keyword.get(opts, :transport, AmarulaClient),
         storage_token: nil,
@@ -99,7 +96,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         identity_error: :not_connected,
         identity_request: nil,
         identity_timeout_ms: timeout,
-        lifecycle_dispatcher: start_dispatcher(lifecycle)
+        lifecycle_dispatcher: start_dispatcher(sink)
       }
 
       case connect_with_storage(state) do
@@ -476,7 +473,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp handle_event(event, data, state) do
-    case Pairing.lifecycle_status(event, data) do
+    case lifecycle_status(event, data, state) do
       nil ->
         state
 
@@ -486,6 +483,24 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         notify(state, event)
         state
     end
+  end
+
+  defp lifecycle_status(:error, _data, state), do: recovery_status(state)
+
+  defp lifecycle_status(:connection_update, %{connection: :disconnected}, state),
+    do: recovery_status(state)
+
+  defp lifecycle_status(event, data, _state), do: Pairing.lifecycle_status(event, data)
+
+  defp recovery_status(state) do
+    if function_exported?(state.transport, :recovery_status, 1) and
+         state.transport.recovery_status(state.conn) == :reconnecting,
+       do: :reconnecting,
+       else: :failed
+  rescue
+    _ -> :failed
+  catch
+    _, _ -> :failed
   end
 
   defp emit_messages(messages, metadata, state) do
@@ -535,23 +550,53 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
       identity_error: state.identity_error
     }
 
-  defp notify(%{lifecycle_sink_mfa: nil}, _), do: :ok
+  defp notify(state, event) do
+    snapshot = notification(state, event)
 
-  defp notify(state, event),
-    do: send(state.lifecycle_dispatcher, {:notify, notification(state, event), state.sink_opts})
+    metadata =
+      Map.merge(snapshot, %{
+        category: :connection_lifecycle,
+        source: self(),
+        presentation: Pairing.presentation(snapshot)
+      })
+
+    payload =
+      ActionEvent.new(%{
+        adapter: Adapter,
+        adapter_name: :whatsapp,
+        action_id: "connection_update",
+        value: Atom.to_string(event),
+        raw: %{},
+        metadata: metadata
+      })
+
+    envelope = EventEnvelope.new(%{adapter_name: :whatsapp, event_type: :action, payload: payload, raw: %{}})
+    send(state.lifecycle_dispatcher, {:notify, envelope, state.sink_opts})
+  end
 
   # Deliver callbacks in order outside the worker so sinks may safely query
   # status or request an identity refresh. No new runtime supervisor is needed.
-  defp start_dispatcher(nil), do: nil
   defp start_dispatcher(sink), do: spawn_link(fn -> dispatch_loop(sink) end)
-  defp stop_dispatcher(%{lifecycle_dispatcher: nil}), do: :ok
   defp stop_dispatcher(state), do: Process.exit(state.lifecycle_dispatcher, :shutdown)
 
   defp dispatch_loop(sink) do
     receive do
       {:notify, payload, opts} ->
-        deliver_notification(sink, payload, opts)
+        dispatch_notification(sink, payload, opts)
         dispatch_loop(sink)
+    end
+  end
+
+  defp dispatch_notification(sink, payload, opts) do
+    case deliver_notification(sink, payload, opts) do
+      {:error, :runtime_not_ready} ->
+        receive do
+        after
+          100 -> dispatch_notification(sink, payload, opts)
+        end
+
+      _ ->
+        :ok
     end
   end
 
@@ -634,8 +679,6 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp invoke_sink({module, function, args}, payload, opts), do: apply(module, function, args ++ [payload, opts])
-  defp validate_optional_sink(nil), do: :ok
-  defp validate_optional_sink(sink), do: validate_sink(sink)
   defp validate_sink({module, function, args}) when is_atom(module) and is_atom(function) and is_list(args), do: :ok
   defp validate_sink(_), do: {:error, :invalid_sink_mfa}
 end

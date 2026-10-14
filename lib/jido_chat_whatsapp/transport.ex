@@ -31,6 +31,8 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @type send_result :: {:ok, String.t()} | {:error, term()}
   @type message_ref :: {String.t(), String.t(), boolean()}
 
+  @doc "Classifies transport recovery after an error; never returns raw provider data."
+  @callback recovery_status(conn()) :: :reconnecting | :failed
   @callback health(conn()) :: :ok | {:error, term()}
   @callback logout(conn(), keyword()) :: :ok | {:error, term()}
   @callback account_identity(conn()) ::
@@ -83,7 +85,8 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @callback request_pairing_code(conn(), phone :: String.t(), opts :: keyword()) ::
               {:ok, String.t()} | {:error, term()}
 
-  @optional_callbacks media_reference: 2,
+  @optional_callbacks recovery_status: 1,
+                      media_reference: 2,
                       connection_processes: 1,
                       resolve_media_reference: 2,
                       user_phone: 2,

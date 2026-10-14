@@ -70,8 +70,7 @@ This is the expected mode for `jido_messaging` bridges.
       mode: "linked_device",
       profile: "agent_primary"
     },
-    sink_mfa: {Jido.Messaging.IngressSink, :emit, [MyApp.Messaging, "bridge_wa"]},
-    lifecycle_sink_mfa: {MyApp.WhatsAppStatus, :emit, ["agent_primary"]}
+    sink_mfa: {MyApp.Ingress, :emit, ["bridge_wa"]}
   )
 
 children = specs
@@ -89,13 +88,16 @@ retain the host's existing infrastructure supervision/recovery. Remove that sett
 when the host wiring is removed. The package never adopts an existing supervisor
 or starts a second owner. This option is a boot-time setting.
 
-The message sink receives chat payloads for `Adapter.transform_incoming/1`.
-Pairing, QR and connection updates go only to the optional `lifecycle_sink_mfa`.
-Both callbacks receive their configured arguments followed by `(payload, opts)`.
-Lifecycle maps carry `profile`, `attempt_id`, `event`, `status`, `qr`, `identity`,
-`identity_status` and `identity_error`; treat
-that sink as a trusted credential display boundary. With no lifecycle sink,
-these updates are discarded. This replaces the preview's mixed action/chat sink.
+The single `sink_mfa` receives chat payloads and typed event envelopes, followed
+by callback options. Normalize plain chat payloads with `Adapter.transform_incoming/1`;
+route envelopes with `Jido.Chat.route_event/4`. Lifecycle uses `:action` envelopes,
+action ID `"connection_update"`, and `metadata.category: :connection_lifecycle`.
+Metadata includes profile, attempt, originating worker source, event, status, QR
+and sanitized identity fields. Treat the sink as a confidential QR display boundary;
+lifecycle must never become a message or invoke an agent. The old
+`lifecycle_sink_mfa` option is ignored and must be removed. Existing hosts need the
+[consumer migration](docs/adapter_contracts.md#zaq-migration-handoff-work-fqt)
+before adopting this change; ZAQ is not yet compatible.
 Only socket open reports `:connected`; pairing success reports `:authenticating`.
 QR expiry reports `status: :expired` and `qr: nil`, retained in subsequent
 `ConnectionWorker.status/1` snapshots. This differs from transport

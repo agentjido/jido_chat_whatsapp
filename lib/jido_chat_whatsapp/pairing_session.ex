@@ -21,7 +21,7 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   A timed-out durable callback may have committed: retry the same attempt ID.
   """
   use GenServer, restart: :temporary
-  alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
+  alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker, Pairing}
   alias Jido.Chat.WhatsApp.Storage.{Split, Temporary}
 
   @doc "Starts a provisional session with trusted host callbacks and explicit ownership."
@@ -126,8 +126,14 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
     do: {:reply, {:ok, presentation(state)}, state}
 
   def handle_call({_, :retry}, _, state) do
-    result = ConnectionWorker.reconnect(state.worker)
-    {:reply, if(result == :ok, do: {:ok, presentation(state)}, else: result), state}
+    result = retry_connection(state.worker, ConnectionWorker.status(state.worker))
+
+    if result == :ok do
+      status = presentation(state)
+      {:reply, {:ok, status}, %{state | presented: confirmation_key(status)}}
+    else
+      {:reply, result, state}
+    end
   end
 
   @impl true
@@ -186,6 +192,16 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
     end
   end
 
+  defp retry_connection(_worker, %{status: :connected, identity: %{phone_number: phone}})
+       when is_binary(phone), do: :ok
+
+  defp retry_connection(worker, %{status: :connected}), do: ConnectionWorker.refresh_identity(worker)
+
+  defp retry_connection(_worker, %{status: status})
+       when status in [:connecting, :reconnecting, :authenticating, :pairing], do: :ok
+
+  defp retry_connection(worker, _status), do: ConnectionWorker.reconnect(worker)
+
   defp presentation(%{saved: saved}) when not is_nil(saved), do: %{phase: :saved, saved: saved}
 
   defp presentation(%{snapshot: snapshot, identity: identity}) when not is_nil(snapshot),
@@ -193,7 +209,7 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
 
   defp presentation(state) do
     status = ConnectionWorker.status(state.worker)
-    projected = project_status(status)
+    projected = Pairing.presentation(status)
 
     case status do
       %{status: :connected, identity: %{phone_number: phone} = identity} when is_binary(phone) ->
@@ -304,39 +320,6 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
       {:ok, value} -> value
       _ -> {:error, :callback_failed}
     end
-  end
-
-  defp project_status(%{status: status, attempt_id: attempt, qr: qr}) do
-    {phase, level, summary} =
-      case status do
-        :connected ->
-          {:connected, :ok, "Linked device connected"}
-
-        :pairing ->
-          {:pairing, :pending, "Scan the QR code to connect"}
-
-        :expired ->
-          {:expired, :error, "Pairing code expired; retry connection"}
-
-        :failed ->
-          {:failed, :error, "Device connection failed; retry connection"}
-
-        value when value in [:disconnected, :logged_out] ->
-          {:disconnected, :error, "Linked device disconnected"}
-
-        _ ->
-          {:pending, :pending, "Waiting for device connection"}
-      end
-
-    %{
-      attempt_id: inspect(attempt),
-      phase: phase,
-      status: level,
-      summary: summary,
-      expires_at: nil,
-      qr: if(phase == :pairing and is_binary(qr), do: qr),
-      mode: "linked_device"
-    }
   end
 
   defp safely(fun) do

@@ -14,6 +14,44 @@ defmodule Jido.Chat.WhatsApp.Pairing do
   def lifecycle_status(event, _) when event in [:pairing_failure, :error], do: :failed
   def lifecycle_status(_, _), do: nil
 
+  @doc "Projects a connection snapshot into a safe presentation shared by pairing and lifecycle events."
+  @spec presentation(map()) :: map()
+  def presentation(%{status: status, attempt_id: attempt, qr: qr}) do
+    {phase, level, summary} =
+      case status do
+        :connected ->
+          {:connected, :ok, "Linked device connected"}
+
+        :reconnecting ->
+          {:pending, :pending, "Reconnecting with the linked account"}
+
+        :pairing ->
+          {:pairing, :pending, "Scan the QR code to connect"}
+
+        :expired ->
+          {:expired, :error, "Pairing code expired; retry connection"}
+
+        :failed ->
+          {:failed, :error, "Device connection failed; retry connection"}
+
+        value when value in [:disconnected, :logged_out] ->
+          {:disconnected, :error, "Linked device disconnected"}
+
+        _ ->
+          {:pending, :pending, "Waiting for device connection"}
+      end
+
+    %{
+      attempt_id: inspect(attempt),
+      phase: phase,
+      status: level,
+      summary: summary,
+      expires_at: nil,
+      qr: if(phase == :pairing and is_binary(qr), do: qr),
+      mode: "linked_device"
+    }
+  end
+
   @doc "Runs the interactive pairing flow for one Amarula profile."
   @spec run(String.t(), keyword()) :: :ok | :timeout | {:error, :connection_failed}
   def run(profile, opts) when is_binary(profile) and is_list(opts) do

@@ -49,12 +49,15 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
   end
 
   defmodule Sink do
-    def emit(test_pid, payload, _opts), do: send(test_pid, {:lifecycle, payload})
+    def emit(test_pid, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: payload}}, _opts),
+      do: send(test_pid, {:lifecycle, payload})
+
+    def emit(test_pid, payload, opts), do: chat(test_pid, payload, opts)
     def chat(test_pid, payload, _opts), do: send(test_pid, {:chat, payload})
   end
 
   defmodule ReentrantSink do
-    def emit(test_pid, session, payload, _opts) do
+    def emit(test_pid, session, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: payload}}, _opts) do
       worker = Agent.get(session, &Map.get(&1, :worker))
       if worker, do: send(test_pid, {:sink_snapshot, ConnectionWorker.status(worker)})
       send(test_pid, {:lifecycle, payload})
@@ -91,8 +94,7 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
 
     {:ok, [spec]} =
       Adapter.listener_child_specs(profile,
-        sink_mfa: {Sink, :chat, [self()]},
-        lifecycle_sink_mfa: sink,
+        sink_mfa: sink,
         identity_timeout_ms: Keyword.get(opts, :identity_timeout_ms, 2_500),
         ingress: %{
           mode: :linked_device,

@@ -612,7 +612,6 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     [
       bridge_id: bridge_id,
       sink_mfa: sink_mfa,
-      lifecycle_sink_mfa: Keyword.get(opts, :lifecycle_sink_mfa),
       identity_timeout_ms: Keyword.get(opts, :identity_timeout_ms, 2_500),
       sink_opts: [bridge_id: bridge_id],
       transport: get_map_value(ingress, [:transport, "transport"]) || AmarulaClient,
