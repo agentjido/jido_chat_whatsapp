@@ -3,8 +3,6 @@ defmodule Jido.Chat.WhatsApp.Message do
   Normalization helpers for Amarula messages.
   """
 
-  alias Jido.Chat.ReactionEvent
-
   @media_type_pattern ~r/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/
 
   @doc "Converts an Amarula message into a plain payload map suitable for listener ingress."
@@ -89,7 +87,7 @@ defmodule Jido.Chat.WhatsApp.Message do
   end
 
   @doc "Builds a canonical reaction event from a normalized Amarula reaction payload."
-  @spec reaction_event(map()) :: {:ok, ReactionEvent.t()} | {:error, term()}
+  @spec reaction_event(map()) :: {:ok, map()} | {:error, term()}
   def reaction_event(payload) when is_map(payload) do
     content = map_get(payload, [:content, "content"]) || %{}
     key = map_get(content, [:key, "key"])
@@ -100,7 +98,7 @@ defmodule Jido.Chat.WhatsApp.Message do
       {:error, :missing_reaction_target}
     else
       {:ok,
-       ReactionEvent.new(%{
+       %{
          adapter_name: :whatsapp,
          thread_id: thread_id(channel_jid),
          channel_id: channel_jid,
@@ -110,7 +108,7 @@ defmodule Jido.Chat.WhatsApp.Message do
          user: reaction_user(payload),
          raw: payload,
          metadata: %{from_me: truthy?(map_get(payload, [:from_me, "from_me"]))}
-       })}
+       }}
     end
   end
 
@@ -168,6 +166,9 @@ defmodule Jido.Chat.WhatsApp.Message do
 
   defp normalize_content_value(%_{} = struct),
     do: struct |> Map.from_struct() |> normalize_content_map()
+
+  defp normalize_content_value({jid, id, _from_me}), do: %{jid: address_to_jid(jid), id: id}
+  defp normalize_content_value({jid, id, _from_me, _participant}), do: %{jid: address_to_jid(jid), id: id}
 
   defp normalize_content_value({jid, id}), do: %{jid: address_to_jid(jid), id: id}
   defp normalize_content_value(value) when is_map(value), do: normalize_content_map(value)
@@ -256,10 +257,8 @@ defmodule Jido.Chat.WhatsApp.Message do
   defp normalize_type(type) when is_atom(type), do: type
 
   defp normalize_type(type) when is_binary(type) do
-    type
-    |> String.trim()
-    |> String.downcase()
-    |> String.to_atom()
+    normalized = type |> String.trim() |> String.downcase()
+    Enum.find([:text, :media, :edit, :revoke, :reaction, :other], :other, &(Atom.to_string(&1) == normalized))
   end
 
   defp normalize_type(_), do: :other

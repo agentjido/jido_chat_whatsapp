@@ -52,11 +52,11 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
     Amarula.send_text(conn, jid, text, opts)
   rescue
     exception ->
-      Logger.warning("WhatsApp send_text failed: #{Exception.message(exception)}")
+      Logger.warning("WhatsApp send_text failed. Error data was redacted.")
       {:error, exception}
   catch
     kind, reason ->
-      Logger.warning("WhatsApp send_text failed: #{inspect({kind, reason})}")
+      Logger.warning("WhatsApp send_text failed. Error data was redacted.")
       {:error, {kind, reason}}
   end
 
@@ -65,11 +65,11 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
     Amarula.send_media(conn, jid, media_type, data, opts)
   rescue
     exception ->
-      Logger.warning("WhatsApp send_media failed: #{Exception.message(exception)}")
+      Logger.warning("WhatsApp send_media failed. Error data was redacted.")
       {:error, exception}
   catch
     kind, reason ->
-      Logger.warning("WhatsApp send_media failed: #{inspect({kind, reason})}")
+      Logger.warning("WhatsApp send_media failed. Error data was redacted.")
       {:error, {kind, reason}}
   end
 
@@ -78,11 +78,11 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
     Amarula.download_media(media)
   rescue
     exception ->
-      Logger.warning("WhatsApp download_media failed: #{Exception.message(exception)}")
+      Logger.warning("WhatsApp download_media failed. Error data was redacted.")
       {:error, exception}
   catch
     kind, reason ->
-      Logger.warning("WhatsApp download_media failed: #{inspect({kind, reason})}")
+      Logger.warning("WhatsApp download_media failed. Error data was redacted.")
       {:error, {kind, reason}}
   end
 
@@ -119,8 +119,11 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   end
 
   defp configured_profile(opts) do
-    Keyword.get(opts, :profile) ||
+    Keyword.get(
+      opts,
+      :profile,
       Application.get_env(:jido_chat_whatsapp, :profile) ||
-      Application.get_env(:jido_chat_whatsapp, :whatsapp_profile)
+        Application.get_env(:jido_chat_whatsapp, :whatsapp_profile)
+    )
   end
 end
