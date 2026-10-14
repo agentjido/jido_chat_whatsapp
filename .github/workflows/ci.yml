@@ -18,12 +18,13 @@ permissions:
 jobs:
   ci:
     name: CI
-    uses: agentjido/github-actions/.github/workflows/jido-ci.yml@v4
+    uses: agentjido/github-actions/.github/workflows/jido-ci.yml@v5
     secrets: inherit
     with:
       otp_versions: '["27", "28"]'
       elixir_versions: '["1.18", "1.19", "1.20"]'
       credo_command: mix credo --min-priority higher
-      validate_hex_package: false
+      validate_hex_package: true
+      hex_package_command: MIX_ENV=prod mix hex.build
       docs_command: mix docs -f html
       test_command: mix test
