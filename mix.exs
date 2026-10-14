@@ -69,7 +69,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
     [
       chat_dependency(),
       {:amarula, "~> 0.5.0"},
-      {:protobuf, "~> 0.17.0", override: true},
+      {:protobuf, "~> 0.17.0"},
       {:zoi, "~> 0.18.11"},
       {:dotenvy, "~> 1.1", only: [:test]},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
