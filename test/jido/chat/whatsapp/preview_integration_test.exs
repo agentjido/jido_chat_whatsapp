@@ -3,7 +3,6 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
 
   alias Amarula.{Address, Msg}
   alias Amarula.Protocol.Proto
-  alias Jido.Chat.Incoming
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
 
   defmodule IngressTransport do
@@ -81,16 +80,23 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
   end
 
   defmodule ReplySink do
-    def emit(test_pid, payload, opts) do
-      with {:ok, %Incoming{} = incoming} <- Adapter.transform_incoming(payload),
-           {:ok, response} <-
-             Adapter.send_message(
-               incoming.delivery_external_room_id,
-               "reply: #{incoming.text}",
-               conn: test_pid,
-               transport: OutboundTransport,
-               quoted: {incoming.external_message_id, incoming.external_user_id}
-             ) do
+    def emit(test_pid, %Jido.Chat.Delivery{signals: [incoming]}, opts) do
+      {:ok, binding} =
+        Jido.Chat.bind(Adapter,
+          id: "preview-reply",
+          conn: test_pid,
+          transport: OutboundTransport,
+          quoted: {incoming.data["message_id"], incoming.data["sender"]["id"]}
+        )
+
+      request =
+        Jido.Chat.Signal.SendMessage.new!(%{
+          "request_id" => "reply",
+          "room_id" => incoming.data["room_id"],
+          "text" => "reply: #{incoming.data["text"]}"
+        })
+
+      with {:ok, response} <- Jido.Chat.execute(binding, request) do
         send(test_pid, {:incoming_normalized, incoming, opts, response})
         {:ok, :accepted}
       end
@@ -132,14 +138,14 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
     assert send_opts[:quoted] ==
              {"wamid.inbound", "15557654321@s.whatsapp.net"}
 
-    assert_receive {:incoming_normalized, %Incoming{} = incoming, sink_opts, response}
-    assert incoming.external_message_id == "wamid.inbound"
-    assert incoming.delivery_external_room_id == "120363000000000000@g.us"
-    assert incoming.external_user_id == "15557654321@s.whatsapp.net"
-    assert incoming.text == "hello"
+    assert_receive {:incoming_normalized, %Jido.Signal{} = incoming, sink_opts, response}
+    assert incoming.data["message_id"] == "wamid.inbound"
+    assert incoming.data["room_id"] == "120363000000000000@g.us"
+    assert incoming.data["sender"]["id"] == "15557654321@s.whatsapp.net"
+    assert incoming.data["text"] == "hello"
     assert sink_opts[:path] == "/whatsapp/messages_upsert"
     assert sink_opts[:method] == "WHATSAPP"
-    assert response.external_message_id == "wamid.local-reply"
-    assert response.status == :sent
+    assert response.data["result"]["id"] == "wamid.local-reply"
+    assert response.type == "jido.chat.operation.completed" and response.data["result"]["status"] == "sent"
   end
 end

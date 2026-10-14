@@ -8,208 +8,64 @@
 [![Ecosystem](https://img.shields.io/badge/ecosystem-jido.run-0ea5e9.svg)](https://jido.run/ecosystem)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2.svg?logo=discord&logoColor=white)](https://jido.run/discord)
 
-`jido_chat_whatsapp` is the WhatsApp linked-device adapter package for `jido_chat`.
+`jido_chat_whatsapp` provides the `Jido.Chat.WhatsApp.Adapter` adapter for the public Chat Signal contract.
 
-## Release Status
+## Release status
 
-This package is a preview adapter for the Jido 1.x chat package release line.
-It uses [`Amarula`](https://hex.pm/packages/amarula) as the WhatsApp Web client.
+This branch proposes version 0.2. It changes the public communication API.
+Use the immutable PR source commits for review and tests. The new Hex releases
+are not yet published. Production requires Chat 2.0 and compatible upstream
+Signal releases. The dependency helpers keep source pins in development and test.
 
-`Jido.Chat.WhatsApp.Adapter` is the canonical adapter module.
+## Typed operations
 
-## Installation
-
-```elixir
-def deps do
-  [
-    {:jido_chat_whatsapp, "~> 0.1.0"}
-  ]
-end
-```
-
-## Usage
-
-Transform an Amarula-shaped payload:
+The application supplies private binding options and a provider room ID:
 
 ```elixir
-alias Jido.Chat.WhatsApp.Adapter
-
-{:ok, incoming} =
-  Adapter.transform_incoming(%{
-    id: "msg-1",
-    channel_jid: "15551234567@s.whatsapp.net",
-    from_jid: "15557654321@s.whatsapp.net",
-    type: :text,
-    text: "hello"
-  })
+{:ok, binding} = Jido.Chat.bind(Jido.Chat.WhatsApp.Adapter, private_binding_options)
+request = Jido.Chat.Signal.SendMessage.new!(%{
+  "request_id" => "request-1",
+  "room_id" => provider_room_id,
+  "text" => "Hello"
+})
+{:ok, result} = Jido.Chat.execute(binding, request)
 ```
 
-Send a message through an already running Amarula profile:
+The result is an OperationCompleted or OperationFailed signal. Repeating an
+admitted request uses its saved result. Private tokens, clients and resources
+stay outside signal data. Unsupported operations return a defined typed result.
+
+## Inbound delivery
+
+Normalize one complete verified provider input unit with the configured binding:
 
 ```elixir
-{:ok, sent} =
-  Adapter.send_message(
-    "15551234567@s.whatsapp.net",
-    "hi",
-    profile: System.fetch_env!("WHATSAPP_PROFILE")
-  )
+{:ok, delivery} = Jido.Chat.normalize_event(binding, verified_provider_input)
+{:ok, observations} = MyApp.Messaging.accept_delivery(delivery)
 ```
 
-For tests or supervised runtime code, pass `:conn` directly or inject a custom
-`Jido.Chat.WhatsApp.Transport`.
+The Messaging instance owns runtime acceptance. Deliveries retain ordered facts
+and explicit item failures. Membership evidence does not create grants or start
+message handlers. A rejected listener sink follows the provider checkpoint rule.
+Configure protocol version 1 before starting provider listeners.
 
-## Linked-Device Listener
+## Operation support
 
-The adapter supports an Amarula-backed listener via `listener_child_specs/2`.
-This is the expected mode for `jido_messaging` bridges.
+Native: `send_message`, `send_file`, `edit_message`, `delete_message`, `start_typing`, `fetch_metadata`, `fetch_media`, `add_reaction`, `remove_reaction`, `open_dm`.
 
-```elixir
-{:ok, specs} =
-  Jido.Chat.WhatsApp.Adapter.listener_child_specs("bridge_wa",
-    ingress: %{
-      mode: "linked_device",
-      profile: "agent_primary"
-    },
-    sink_mfa: {Jido.Messaging.IngressSink, :emit, [MyApp.Messaging, "bridge_wa"]}
-  )
+Fallback: `post_message`, `fetch_thread`, `post_channel_message`, `stream`.
 
-children = [Amarula.Supervisor | specs]
-```
+All other operations are explicitly unsupported. See the frozen [adapter matrix](https://github.com/agentjido/jido_chat/blob/codex/public-signal-v3/docs/migration/adapter-matrix.json).
 
-Start the shared `Amarula.Supervisor` before the generated connection workers.
-Only one shared Amarula supervisor is needed in the host application's supervision tree.
+## Provider setup
 
-On first pairing Amarula emits QR and pairing lifecycle updates. The worker
-forwards those as non-message action events. Chat messages from
-`:messages_upsert` are normalized into `Jido.Chat.Incoming`.
+WhatsApp uses linked devices through Amarula. Keep pairing codes, QR data, profile storage and credentials private. The Amarula dependency stays behind Jido.Chat.WhatsApp.Transport. Listener sink rejection retains the declared checkpoint and retry behavior.
 
-Linked-device events are local Amarula process messages. They are not HTTP
-webhooks. `verify_webhook/2` is a compatibility no-op and is not an
-authentication check. Do not expose it as the security check for a public HTTP
-endpoint. See the [preview validation and security runbook](docs/preview_validation.md).
+## Checks and migration
 
-## Config
+Run `mix test` and `mix quality`. Live tests stay excluded by default. The fixed
+provider fixtures do not need credentials or live traffic.
 
-You can pass a profile per call:
-
-```elixir
-Adapter.send_message("15551234567@s.whatsapp.net", "hi", profile: "agent_primary")
-```
-
-Or configure a default profile:
-
-```elixir
-config :jido_chat_whatsapp, :profile, "agent_primary"
-```
-
-Bridge listener settings can include:
-
-```elixir
-%{
-  ingress: %{
-    mode: "linked_device",
-    profile: "agent_primary",
-    storage_root: "/var/lib/my_app/amarula"
-  }
-}
-```
-
-## Pairing
-
-This adapter ships a QR-only pairing task that creates the Amarula profile:
-
-```bash
-export AMARULA_DATA_DIR="$PWD/amarula_data"
-
-mix jido_chat_whatsapp.pair agent_primary
-```
-
-Phone-code pairing is disabled in this task. Amarula 0.5.7 logs the raw phone
-pairing code. Keep the task QR-only until an Amarula release provides verified
-safe redaction.
-
-Use the same profile name with `config :jido_chat_whatsapp, :profile` or with
-per-call/listener `:profile` options.
-
-Use the [preview validation runbook](docs/preview_validation.md) to check QR
-pairing, stored-session reconnect, bounded `401` handling, and the live release
-gates. Keep QR text and Amarula profile storage out of Git and logs.
-
-The linked device will usually appear in WhatsApp as `Google Chrome (macOS)`.
-That is expected: Amarula connects through the WhatsApp Web linked-device
-protocol and presents a browser identity by default. QR pairing and phone-code
-pairing are linked-device operations, but this task permits QR pairing only.
-
-## Live Integration Test
-
-There is a live test module at:
-
-- `test/jido/chat/whatsapp/live_integration_test.exs`
-
-It is skipped by default. To run it after pairing a WhatsApp linked device:
-
-```bash
-cp .env.example .env
-mix test test/jido/chat/whatsapp/live_integration_test.exs --include live
-```
-
-Set `RUN_LIVE_WHATSAPP_TESTS=true`, `WHATSAPP_PROFILE` to the paired Amarula
-profile, and `WHATSAPP_TEST_JID` to the recipient chat JID. If you paired with a
-non-default storage location, set `WHATSAPP_STORAGE_ROOT` to the same directory.
-
-To include the interactive receive test, set `WHATSAPP_WAIT_FOR_REPLY=true` and
-reply from the recipient WhatsApp account while the test is waiting:
-
-```bash
-RUN_LIVE_WHATSAPP_TESTS=true WHATSAPP_WAIT_FOR_REPLY=true \
-  mix test test/jido/chat/whatsapp/live_integration_test.exs --include live
-```
-
-Fresh or restricted WhatsApp accounts may authenticate successfully but reject
-outbound sends with server ack errors such as `{:send_rejected, "463"}`. To
-verify linked-device connectivity without sending messages:
-
-```bash
-RUN_LIVE_WHATSAPP_TESTS=true \
-  mix test test/jido/chat/whatsapp/live_integration_test.exs \
-    --include live --exclude whatsapp_live_outbound
-```
-
-To test a single throttled outbound text message:
-
-```bash
-RUN_LIVE_WHATSAPP_TESTS=true WHATSAPP_LIVE_SEND_DELAY_MS=60000 \
-  mix test test/jido/chat/whatsapp/live_integration_test.exs \
-    --include live --only whatsapp_live_outbound_smoke
-```
-
-The send-heavy live tests are tagged `:whatsapp_live_destructive` and wait
-`WHATSAPP_LIVE_SEND_DELAY_MS` plus optional `WHATSAPP_LIVE_SEND_JITTER_MS`
-before each outbound test. Keep those tests opt-in for accounts with enough
-WhatsApp reputation to tolerate edit/delete/reaction/media coverage.
-
-Current live coverage:
-
-- start one already paired Amarula profile for the suite
-- linked-device connectivity and metadata checks
-- single throttled outbound text smoke test
-- send, edit, and delete text messages
-- typing, metadata, and DM JID normalization
-- stream fallback through core `Jido.Chat.Adapter.stream/4`
-- lightweight quoted replies
-- reaction add/remove
-- local file uploads from disk paths and in-memory byte payloads
-- canonical text and single-file posts through core `post_message/4`
-- optional manual receive normalization when `WHATSAPP_WAIT_FOR_REPLY=true`
-- unsupported-core contract checks
-
-Current local preview coverage also includes a deterministic receive, normalize,
-and quoted-reply chain through local fake transports. It does not start
-`jido_messaging` and does not make a live-account claim.
-
-Planned live coverage:
-
-- QR pairing lifecycle
-- receive-to-reply loop through `jido_messaging`
-- execution of the stored-session and bounded `401` release gates
-- image/video/audio-specific media sends
+See the [migration guide](https://github.com/agentjido/jido_chat/blob/codex/public-signal-v3/docs/migration/MIGRATION_GUIDE.md)
+for API mappings, the complete runnable local example, limits, release order and
+rollback pins. Run `mix docs` to build this package's API documentation.

@@ -2,7 +2,6 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
   use ExUnit.Case, async: true
 
   alias Jido.Chat
-  alias Jido.Chat.{EventEnvelope, ReactionEvent}
   alias Jido.Chat.WhatsApp.Adapter
 
   defmodule MockTransport do
@@ -76,7 +75,7 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert caps.send_message == :native
     assert caps.send_file == :native
     assert caps.fetch_media == :native
-    assert caps.parse_event == :native
+    assert caps.normalize_event == :native
     assert caps.fetch_messages == :unsupported
 
     assert :ok = Chat.Adapter.validate_capabilities(Adapter)
@@ -96,13 +95,13 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
       text: "hello"
     }
 
-    assert {:ok, incoming} = Adapter.transform_incoming(payload)
-    assert incoming.external_room_id == "15551234567@s.whatsapp.net"
-    assert incoming.external_user_id == "15557654321@s.whatsapp.net"
-    assert incoming.text == "hello"
-    assert incoming.chat_type == :dm
-    assert incoming.channel_meta.adapter_name == :whatsapp
-    assert incoming.channel_meta.is_dm == true
+    incoming = normalize(payload)
+    assert incoming.data["room_id"] == "15551234567@s.whatsapp.net"
+    assert incoming.data["sender"]["id"] == "15557654321@s.whatsapp.net"
+    assert incoming.data["text"] == "hello"
+    assert incoming.data["conversation_kind"] == "direct"
+    assert incoming.source == Jido.Chat.Signal.Identity.binding_source("wa-test")
+    assert incoming.data["conversation_kind"] == "direct"
   end
 
   test "transform_incoming/1 normalizes media payloads" do
@@ -127,10 +126,12 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
       }
     }
 
-    assert {:ok, incoming} = Adapter.transform_incoming(payload)
-    assert incoming.chat_type == :group
-    assert incoming.text == "look"
-    assert [%{kind: :image, media_type: "image/jpeg", size_bytes: 123} = media] = incoming.media
+    incoming = normalize(payload)
+    assert incoming.data["conversation_kind"] == "group"
+    assert incoming.data["text"] == "look"
+    assert [item] = incoming.data["media"]
+    assert {:ok, media} = Chat.resolve_resource(Process.get(:wa_binding), item["resource_ref"])
+    assert media.kind == :image and media.media_type == "image/jpeg" and media.size_bytes == 123
 
     assert {:ok, "whatsapp media bytes"} =
              Adapter.fetch_media(media, transport: MockTransport)
@@ -260,24 +261,24 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
       }
     }
 
-    assert {:ok, incoming} = Adapter.transform_incoming(payload)
-    assert incoming.text == "hello"
+    incoming = normalize(payload)
+    assert incoming.data["text"] == "hello"
 
-    assert {:ok, incoming} =
-             Adapter.transform_incoming(%{
-               "message" => %{
-                 "id" => "msg-2",
-                 "channel_jid" => "15551234567@s.whatsapp.net",
-                 "from_jid" => "15557654321@s.whatsapp.net",
-                 "type" => "text",
-                 "text" => "from string wrapper"
-               }
-             })
+    incoming =
+      normalize(%{
+        "message" => %{
+          "id" => "msg-2",
+          "channel_jid" => "15551234567@s.whatsapp.net",
+          "from_jid" => "15557654321@s.whatsapp.net",
+          "type" => "text",
+          "text" => "from string wrapper"
+        }
+      })
 
-    assert incoming.text == "from string wrapper"
+    assert incoming.data["text"] == "from string wrapper"
 
-    assert {:error, :unsupported_message_type} = Adapter.transform_incoming(:not_a_payload)
-    assert {:error, :missing_channel} = Adapter.transform_incoming(%{id: "msg-1", text: "hello"})
+    assert %{type: "jido.chat.normalization.failed"} = normalize(:not_a_payload)
+    assert %{type: "jido.chat.normalization.failed"} = normalize(%{id: "msg-1", text: "hello"})
   end
 
   test "parse_event/2 wraps messages in EventEnvelope" do
@@ -293,10 +294,10 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
         }
       })
 
-    assert {:ok, %EventEnvelope{} = envelope} = Adapter.parse_event(request)
-    assert envelope.event_type == :message
-    assert envelope.thread_id == "whatsapp:15551234567@s.whatsapp.net"
-    assert envelope.payload.text == "hello"
+    envelope = normalize(request.payload)
+    assert envelope.type == "jido.chat.message.received"
+    assert envelope.subject == Jido.Chat.Signal.Identity.conversation_subject("wa-test", "15551234567@s.whatsapp.net")
+    assert envelope.data["text"] == "hello"
   end
 
   test "parse_event/2 wraps reactions in ReactionEvent" do
@@ -312,61 +313,27 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
         }
       })
 
-    assert {:ok, %EventEnvelope{} = envelope} = Adapter.parse_event(request)
-    assert envelope.event_type == :reaction
-    assert %ReactionEvent{} = envelope.payload
-    assert envelope.payload.message_id == "target-msg"
-    assert envelope.payload.emoji == "ok"
+    envelope = normalize(request.payload)
+    assert envelope.type == "jido.chat.reaction.added"
+    assert envelope.data["reaction"] == "ok"
+    assert envelope.data["message_id"] == "target-msg"
+    assert envelope.data["reaction"] == "ok"
   end
 
   test "parse_event/2 handles action payloads and existing envelopes as noops" do
-    action_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "connection_update", data: %{profile: "profile-1", connection: :open}}
-      })
+    {:ok, binding} = Chat.bind(Adapter, id: "private-controls")
 
-    assert {:ok, %EventEnvelope{} = action} = Adapter.parse_event(action_request)
-    assert action.event_type == :action
-    assert action.payload.action_id == "connection_update"
-    assert action.payload.value == "open"
+    for {event, data} <- [
+          {"connection_update", %{connection: :open}},
+          {"connection_update", %{qr: "qr-data"}},
+          {"pairing_code", %{code: "12345678"}},
+          {"history_sync", %{chats: []}}
+        ] do
+      assert {:ok, %{signals: []}} = Chat.normalize_event(binding, %{event: event, data: data})
+    end
 
-    qr_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "connection_update", data: %{profile: "profile-1", qr: "qr-data"}}
-      })
-
-    assert {:ok, %EventEnvelope{} = qr} = Adapter.parse_event(qr_request)
-    assert qr.payload.value == "qr"
-
-    pairing_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "pairing_code", data: %{profile: "profile-1", code: "12345678"}}
-      })
-
-    assert {:ok, %EventEnvelope{} = pairing} = Adapter.parse_event(pairing_request)
-    assert pairing.payload.value == "12345678"
-
-    fallback_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "pairing_success", data: "paired"}
-      })
-
-    assert {:ok, %EventEnvelope{} = fallback} = Adapter.parse_event(fallback_request)
-    assert fallback.payload.action_id == "pairing_success"
-    assert fallback.payload.value == "pairing_success"
-    assert fallback.raw == %{}
-
-    noop_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event_type: :message}
-      })
-
-    assert {:ok, :noop} = Adapter.parse_event(noop_request)
+    assert {:ok, %{signals: [%{type: "jido.chat.normalization.failed"}]}} =
+             Chat.normalize_event(binding, %{event_type: "message", payload: %{}})
   end
 
   test "send_message/3 delegates to configured transport" do
@@ -517,10 +484,11 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     request = Jido.Chat.WebhookRequest.new(%{adapter_name: :whatsapp, payload: %{}})
     assert :ok = Adapter.verify_webhook(request)
 
-    chat = Chat.new(%{id: "whatsapp-test"})
+    {:ok, binding} = Chat.bind(Adapter, id: "control-response")
+    {:ok, unit} = Chat.normalize_event(binding, [])
 
-    assert %{status: 200} = Adapter.format_webhook_response({:ok, chat, :noop})
-    assert %{status: 200} = Adapter.format_webhook_response({:ok, chat, %{}})
+    assert %{status: 200} = Adapter.format_webhook_response({:ok, unit})
+    assert %{status: 200} = Adapter.format_webhook_response({:ok, unit})
     assert %{status: 400} = Adapter.format_webhook_response({:error, :bad_payload})
   end
 
@@ -564,5 +532,12 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
   def emit(test_pid, payload, opts) do
     send(test_pid, {:sink_emit, payload, opts})
     {:ok, :accepted}
+  end
+
+  defp normalize(payload) do
+    {:ok, binding} = Chat.bind(Adapter, id: "wa-test")
+    Process.put(:wa_binding, binding)
+    assert {:ok, %{signals: [fact]}} = Chat.normalize_event(binding, payload)
+    fact
   end
 end

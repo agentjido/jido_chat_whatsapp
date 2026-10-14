@@ -1,12 +1,16 @@
 defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
   use ExUnit.Case, async: false
 
-  alias Jido.Chat.EventEnvelope
   alias Jido.Chat.WhatsApp.ConnectionWorker
   alias Amarula.{Address, Msg}
   alias Amarula.Protocol.Proto
 
   defmodule Sink do
+    def control(test_pid, control, opts) do
+      send(test_pid, {:control, control, opts})
+      {:ok, :accepted}
+    end
+
     def emit(test_pid, payload, opts) do
       send(test_pid, {:sink_emit, payload, opts})
       {:ok, :accepted}
@@ -56,6 +60,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
         {ConnectionWorker,
          bridge_id: "bridge_whatsapp",
          sink_mfa: {Sink, :emit, [self()]},
+         control_mfa: {Sink, :control, [self()]},
          transport: MockTransport,
          config: %{profile: "worker_test", test_pid: self()}}
       )
@@ -70,17 +75,16 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
         {ConnectionWorker,
          bridge_id: "bridge_whatsapp",
          sink_mfa: {Sink, :emit, [self()]},
+         control_mfa: {Sink, :control, [self()]},
          transport: MockTransport,
          config: %{profile: "worker_test_events", test_pid: self()}}
       )
 
     send(pid, {:amarula, :connection_update, %{connection: :open}})
 
-    assert_receive {:sink_emit, %EventEnvelope{} = envelope, opts}
-    assert envelope.event_type == :action
-    assert envelope.payload.action_id == "connection_update"
-    assert envelope.payload.value == "open"
-    assert opts[:mode] == :payload
+    assert_receive {:control, %{event: :connection_update, data: %{connection: :open}}, []}
+    refute_receive {:sink_emit, _, _}
+    assert :sys.get_state(pid).last_result == nil
   end
 
   test "emits messages_upsert entries as payload messages" do
@@ -89,6 +93,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
         {ConnectionWorker,
          bridge_id: "bridge_whatsapp",
          sink_mfa: {Sink, :emit, [self()]},
+         control_mfa: {Sink, :control, [self()]},
          transport: MockTransport,
          config: %{profile: "worker_test_messages", test_pid: self()}}
       )
@@ -108,9 +113,11 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
 
     send(pid, {:amarula, :messages_upsert, %{id: "batch-1", from: Address.pn("15557654321"), messages: [msg]}})
 
-    assert_receive {:sink_emit, %{id: "msg-1", channel_jid: "15551234567@s.whatsapp.net"} = payload, opts}
-    assert payload.metadata.batch_id == "batch-1"
+    assert_receive {:sink_emit, %Jido.Chat.Delivery{signals: [fact]}, opts}
+    assert fact.type == "jido.chat.message.received"
+    assert fact.data["message_id"] == "msg-1" and fact.data["room_id"] == "15551234567@s.whatsapp.net"
     assert opts[:path] == "/whatsapp/messages_upsert"
+    assert :sys.get_state(pid).last_result == {:ok, :accepted}
   end
 
   test "emits pairing and error lifecycle events and ignores unsupported events" do
@@ -119,47 +126,29 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
         {ConnectionWorker,
          bridge_id: "bridge_whatsapp",
          sink_mfa: {Sink, :emit, [self()]},
+         control_mfa: {Sink, :control, [self()]},
          transport: MockTransport,
          config: %{profile: "worker_test_lifecycle", test_pid: self()}}
       )
 
-    send(pid, {:amarula, :pairing_code, %{code: "12345678"}})
-    assert_receive {:sink_emit, %EventEnvelope{} = pairing, pairing_opts}
-    assert pairing.payload.action_id == "pairing_code"
-    assert pairing.payload.value == "12345678"
-    assert pairing_opts[:path] == "/whatsapp/pairing_code"
+    controls = [
+      {:pairing_code, %{code: "12345678"}},
+      {:pairing_success, %{via: :link_code}},
+      {:pairing_failure, %{reason: :timeout}},
+      {:call_update, %{status: :offer}},
+      {:history_sync, %{chats: []}},
+      {:connection_update, %{qr: "qr-data"}},
+      {:error, :boom}
+    ]
 
-    send(pid, {:amarula, :pairing_success, %{via: :link_code}})
-    assert_receive {:sink_emit, %EventEnvelope{} = success, _opts}
-    assert success.payload.action_id == "pairing_success"
-
-    send(pid, {:amarula, :pairing_failure, %{reason: :timeout}})
-    assert_receive {:sink_emit, %EventEnvelope{} = failure, _opts}
-    assert failure.payload.action_id == "pairing_failure"
-    assert failure.payload.value == "pairing_failure"
-
-    send(pid, {:amarula, :call_update, %{status: :offer}})
-    assert_receive {:sink_emit, %EventEnvelope{} = call, _opts}
-    assert call.payload.action_id == "call_update"
-    assert call.payload.value == "offer"
-
-    send(pid, {:amarula, :history_sync, %{chats: []}})
-    assert_receive {:sink_emit, %EventEnvelope{} = history, _opts}
-    assert history.payload.action_id == "history_sync"
-    assert history.payload.value == "history_sync"
-
-    send(pid, {:amarula, :connection_update, %{qr: "qr-data"}})
-    assert_receive {:sink_emit, %EventEnvelope{} = qr, _opts}
-    assert qr.payload.action_id == "connection_update"
-    assert qr.payload.value == "qr"
-
-    send(pid, {:amarula, :error, :boom})
-    assert_receive {:sink_emit, %EventEnvelope{} = error, _opts}
-    assert error.payload.action_id == "error"
-    assert error.payload.value == ":boom"
-    assert error.raw == %{value: ":boom"}
+    for {event, data} <- controls do
+      send(pid, {:amarula, event, data})
+      assert_receive {:control, %{event: ^event, data: ^data, profile: "worker_test_lifecycle"}, []}
+    end
 
     send(pid, {:amarula, :contacts_update, []})
-    refute_receive {:sink_emit, _, _}, 50
+    assert :sys.get_state(pid).last_control.event == :error
+    refute_receive {:sink_emit, _, _}
+    refute_receive {:control, _, _}
   end
 end

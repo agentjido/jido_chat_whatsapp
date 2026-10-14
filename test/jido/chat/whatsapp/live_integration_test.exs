@@ -1,7 +1,6 @@
 defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias Jido.Chat.Adapter, as: ChatAdapter
   alias Jido.Chat.FileUpload
   alias Jido.Chat.PostPayload
   alias Jido.Chat.WhatsApp.Adapter
@@ -132,8 +131,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
     parts = ["jido", " whatsapp", " stream", " fallback"]
 
     assert {:ok, sent} =
-             ChatAdapter.stream(
-               Adapter,
+             native_stream(
                ctx.jid,
                parts,
                Keyword.merge(ctx.opts,
@@ -284,7 +282,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
         text: "jido whatsapp canonical text #{System.system_time(:millisecond)}"
       })
 
-    assert {:ok, text_response} = ChatAdapter.post_message(Adapter, ctx.jid, text_payload, ctx.opts)
+    assert {:ok, text_response} = native_post(ctx.jid, text_payload, ctx.opts)
     text_message_id = response_id(text_response)
 
     on_exit(fn ->
@@ -306,7 +304,7 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
         ]
       })
 
-    assert {:ok, file_response} = ChatAdapter.post_message(Adapter, ctx.jid, file_payload, ctx.opts)
+    assert {:ok, file_response} = native_post(ctx.jid, file_payload, ctx.opts)
     file_message_id = response_id(file_response)
 
     on_exit(fn ->
@@ -334,28 +332,34 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
       assert is_binary(response_id(sent))
 
       assert {:ok, msg} = receive_incoming_reply(ctx.jid, reply_timeout_ms())
-      assert {:ok, incoming} = Adapter.transform_incoming(msg)
+      {:ok, binding} = Jido.Chat.bind(Adapter, id: "live-incoming")
+      assert {:ok, %{signals: [incoming]}} = Jido.Chat.normalize_event(binding, msg)
 
-      assert incoming.external_message_id == msg.id
-      assert incoming.external_room_id == Message.address_to_jid(msg.channel)
-      assert incoming.metadata.from_me == false
+      assert incoming.data["message_id"] == msg.id
+      assert incoming.data["room_id"] == Message.address_to_jid(msg.channel)
+      assert incoming.data["sender"]["is_self"] == false
     else
       refute @wait_for_reply
     end
   end
 
   test "unsupported core surfaces remain explicit unsupported contracts", ctx do
-    assert {:error, :unsupported} = ChatAdapter.fetch_message(Adapter, ctx.jid, "missing", ctx.opts)
-    assert {:error, :unsupported} = ChatAdapter.fetch_messages(Adapter, ctx.jid, ctx.opts)
-    assert {:error, :unsupported} = ChatAdapter.fetch_channel_messages(Adapter, ctx.jid, ctx.opts)
-    assert {:error, :unsupported} = ChatAdapter.list_threads(Adapter, ctx.jid, ctx.opts)
-    assert {:error, :unsupported} = ChatAdapter.open_thread(Adapter, ctx.jid, nil, ctx.opts)
+    {:ok, binding} = Jido.Chat.bind(Adapter, Keyword.put(ctx.opts, :id, "live-unsupported"))
 
-    assert {:error, :unsupported} =
-             ChatAdapter.post_ephemeral(Adapter, ctx.jid, "whatsapp-user", "secret", ctx.opts)
+    for operation <- [
+          :fetch_message,
+          :fetch_messages,
+          :fetch_channel_messages,
+          :list_threads,
+          :open_thread,
+          :post_ephemeral,
+          :open_modal
+        ] do
+      request = Jido.Chat.AdapterTestKit.Factories.operation_request(binding, operation)
 
-    assert {:error, :unsupported} =
-             ChatAdapter.open_modal(Adapter, ctx.jid, %{title: "modal"}, ctx.opts)
+      assert {:ok, %{type: "jido.chat.operation.failed", data: %{"code" => "unsupported"}}} =
+               Jido.Chat.execute(binding, request)
+    end
   end
 
   defp start_connection!(profile) do
@@ -636,7 +640,6 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
   end
 
   defp response_id(%{external_message_id: value}) when is_binary(value), do: value
-  defp response_id(%{message_id: value}) when is_binary(value), do: value
   defp response_id(_response), do: nil
 
   defp phone_from_jid(jid) do
@@ -665,5 +668,34 @@ defmodule Jido.Chat.WhatsApp.LiveIntegrationTest do
       {:ok, _result} -> :ok
       {:error, _reason} -> :ok
     end
+  end
+
+  defp native_post(room, payload, opts) do
+    {:ok, binding} = Jido.Chat.bind(Adapter, Keyword.put(opts, :id, "live-post"))
+    files = PostPayload.upload_candidates(payload)
+
+    content =
+      case files do
+        [] ->
+          %{"kind" => "text", "text" => PostPayload.display_text(payload)}
+
+        [file] ->
+          {:ok, ref} = Jido.Chat.put_resource(binding, "file", FileUpload.normalize(file))
+          %{"kind" => "media", "resource_ref" => ref, "caption" => PostPayload.display_text(payload)}
+      end
+
+    request = Jido.Chat.Signal.PostMessage.new!(%{"request_id" => "post", "room_id" => room, "content" => content})
+
+    with {:ok, result} <- Jido.Chat.execute(binding, request),
+         do: {:ok, %{external_message_id: result.data["result"]["id"]}}
+  end
+
+  defp native_stream(room, parts, opts) do
+    {:ok, binding} = Jido.Chat.bind(Adapter, Keyword.put(opts, :id, "live-stream"))
+    {:ok, ref} = Jido.Chat.put_resource(binding, "stream", parts)
+    request = Jido.Chat.Signal.Stream.new!(%{"request_id" => "stream", "room_id" => room, "resource_ref" => ref})
+
+    with {:ok, result} <- Jido.Chat.execute(binding, request),
+         do: {:ok, %{external_message_id: result.data["result"]["id"]}}
   end
 end
