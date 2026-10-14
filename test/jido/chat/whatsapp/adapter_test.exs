@@ -105,6 +105,44 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert incoming.channel_meta.is_dm == true
   end
 
+  test "transform_incoming/1 normalizes push names without changing the author identity" do
+    payload = %{
+      channel_jid: "120363000000000@g.us",
+      from_jid: "15557654321@s.whatsapp.net",
+      text: "hello"
+    }
+
+    for name <- [nil, "", " ", "~", " ~ "] do
+      assert {:ok, incoming} = Adapter.transform_incoming(Map.put(payload, :pushname, name))
+      assert incoming.external_user_id == payload.from_jid
+      assert incoming.author.user_id == payload.from_jid
+      assert is_nil(incoming.author.full_name)
+      assert is_nil(incoming.display_name)
+    end
+
+    assert {:ok, incoming} =
+             Adapter.transform_incoming(Map.put(payload, :pushname, "  Zoë @ Work  "))
+
+    assert incoming.author.full_name == "Zoë @ Work"
+    assert incoming.display_name == "Zoë @ Work"
+  end
+
+  test "Amarula messages use the same push-name normalization" do
+    message = %Amarula.Msg{
+      channel: Amarula.Address.pn("15551234567"),
+      from: Amarula.Address.pn("15557654321"),
+      pushname: " ~ ",
+      type: :text,
+      content: "hello",
+      raw: %{}
+    }
+
+    assert {:ok, incoming} = Adapter.transform_incoming(message)
+    assert incoming.external_user_id == "15557654321@s.whatsapp.net"
+    assert is_nil(incoming.author.full_name)
+    assert is_nil(incoming.display_name)
+  end
+
   test "transform_incoming/1 normalizes media payloads" do
     media_key = String.duplicate("k", 32)
     encrypted_hash = String.duplicate("h", 32)

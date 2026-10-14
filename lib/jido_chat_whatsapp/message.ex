@@ -59,19 +59,20 @@ defmodule Jido.Chat.WhatsApp.Message do
 
         from_me = truthy?(map_get(payload, [:from_me, "from_me"]))
         from_jid = from_jid || if(from_me, do: List.first(aliases) || "unknown")
+        display_name = normalize_pushname(map_get(payload, [:pushname, "pushname"]))
 
         {:ok,
          %{
            external_room_id: channel_jid,
            external_user_id: from_jid,
-           author: author(from_jid, from_me, map_get(payload, [:pushname, "pushname"])),
+           author: author(from_jid, from_me, display_name),
            mentions: mentions,
            was_mentioned: Enum.any?(mentions, & &1.is_self),
            reply_context: reply_context(map_get(payload, [:quoted, "quoted"]), aliases),
            text: map_get(payload, [:text, "text"]) || text_for(type, map_get(payload, [:content, "content"])),
            media: media_for(type, map_get(payload, [:content, "content"])),
            username: from_jid,
-           display_name: map_get(payload, [:pushname, "pushname"]),
+           display_name: display_name,
            external_message_id: map_get(payload, [:id, "id"]),
            external_reply_to_id: quoted_id(map_get(payload, [:quoted, "quoted"])),
            timestamp: normalize_timestamp(map_get(payload, [:timestamp, "timestamp"])),
@@ -323,6 +324,15 @@ defmodule Jido.Chat.WhatsApp.Message do
 
   defp author(nil, _self, _name), do: nil
   defp author(jid, is_self, name), do: %{user_id: jid, user_name: jid, full_name: name, is_me: is_self}
+
+  defp normalize_pushname(name) when is_binary(name) do
+    case String.trim(name) do
+      name when name in ["", "~"] -> nil
+      name -> name
+    end
+  end
+
+  defp normalize_pushname(_), do: nil
 
   defp reply_context(quoted, aliases) when is_map(quoted) do
     jid = quoted |> map_get([:from_jid, "from_jid", :from, "from"]) |> address_to_jid()

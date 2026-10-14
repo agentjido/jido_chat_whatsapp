@@ -29,6 +29,11 @@ resolve the reference. Logout/re-pairing, profile renaming, credential loss, or
 WhatsApp CDN expiry can make old attachments unavailable. Version 1 references
 are limited to 24,000 bytes, with a maximum 16,384-byte private descriptor.
 
+Incoming push names are trimmed before they enter the canonical author and
+display-name fields. Blank and `~` placeholders become `nil`; external user IDs
+remain unchanged. Phone and LID enrichment remains connection-scoped through
+`Adapter.get_user/2`.
+
 For manual ingress, use `Adapter.transform_incoming(payload, opts)` or
 `Adapter.parse_event(request, opts)` with `:profile`, `:conn`, or `:connection`
 to obtain opaque references. The legacy no-options normalization and structured
