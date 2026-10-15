@@ -3,8 +3,8 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
   Composes host-authorized durable records with package-owned volatile storage.
 
   Options require `:profile`, opaque `:context` and `:scope`, and
-  `:document_mfa` receiving its configured arguments followed by
-  `(context, request)`. It must authorize every request, including the
+  `:sink_mfa` receiving private `Storage.Request` structs and callback options.
+  The context is the opaque binding. Hosts must authorize every request, including the
   reserved `__binding_check__` namespace used before RAM operations.
   It returns :ok, :error, {:ok, value}, or {:error, reason}; failures stop
   progress. Only trusted host code may construct these options.
@@ -17,28 +17,20 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
   into this backend; generic host callers need not construct Split options.
   """
 
-  alias Jido.Chat.WhatsApp.Storage.Mnesia
+  alias Jido.Chat.WhatsApp.Storage.{Mnesia, Request}
 
   @volatile_namespaces ["session", "sender_key"]
 
   @type state :: map()
 
-  @doc "Builds stable storage options; host document callbacks authorize the opaque binding on every access."
+  @doc "Builds stable storage options; the host sink authorizes the opaque binding on every access."
   @spec binding_options(term(), keyword()) :: keyword()
   def binding_options(binding, opts) when not is_nil(binding) do
-    {module, function, args} =
-      case Keyword.fetch(opts, :sink_mfa) do
-        {:ok, sink} -> {Jido.Chat.WhatsApp.Storage.Request, :document, [sink]}
-        :error -> Keyword.fetch!(opts, :document_mfa)
-      end
-
-    context = Keyword.fetch!(opts, :context)
-
     [
       profile: profile(binding),
       scope: {:whatsapp, binding},
       context: binding,
-      document_mfa: {module, function, args ++ [context]},
+      sink_mfa: Keyword.fetch!(opts, :sink_mfa),
       volatile_namespaces: Keyword.get(opts, :volatile_namespaces, @volatile_namespaces)
     ]
   end
@@ -56,7 +48,7 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
     %{
       context: Keyword.fetch!(opts, :context),
       profile: Keyword.fetch!(opts, :profile),
-      document_mfa: Keyword.fetch!(opts, :document_mfa),
+      sink_mfa: Keyword.fetch!(opts, :sink_mfa),
       volatile_namespaces: Keyword.get(opts, :volatile_namespaces, @volatile_namespaces),
       volatile: Mnesia.new(scope: Keyword.fetch!(opts, :scope))
     }
@@ -195,9 +187,9 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
   defp volatile_call(state, %{op: :list_keys, namespace: ns}),
     do: Mnesia.list_keys(state.volatile, state.profile, ns)
 
-  defp document_call(%{context: context, document_mfa: {module, function, args}} = state, request) do
+  defp document_call(%{context: context, sink_mfa: sink} = state, request) do
     if Mnesia.current?(state.volatile.generation) do
-      result = apply(module, function, args ++ [context, request])
+      result = Request.call(sink, context, request)
       if Mnesia.current?(state.volatile.generation), do: result, else: {:error, :storage_unavailable}
     else
       {:error, :storage_unavailable}

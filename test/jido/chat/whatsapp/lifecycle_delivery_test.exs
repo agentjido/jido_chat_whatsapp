@@ -74,14 +74,11 @@ defmodule Jido.Chat.WhatsApp.LifecycleDeliveryTest do
     result
   end
 
-  def legacy(_, _), do: raise("removed callback invoked")
-
   defp listener(host, profile) do
     {:ok, [spec]} =
       Adapter.listener_child_specs(profile,
         ingress: %{mode: :linked_device, profile: profile, transport: Transport, config: %{observer: self()}},
-        sink_mfa: {__MODULE__, :emit, [self(), host]},
-        lifecycle_sink_mfa: {__MODULE__, :legacy, []}
+        sink_mfa: {__MODULE__, :emit, [self(), host]}
       )
 
     worker = start_supervised!(spec)

@@ -40,8 +40,7 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
         supervisor: supervisor,
         attempt_id: "recovery_#{System.unique_integer([:positive])}",
         context: nil,
-        persist_mfa: {__MODULE__, :unused, []},
-        start_mfa: {__MODULE__, :unused, []},
+        sink_mfa: {__MODULE__, :unused, []},
         transport: __MODULE__,
         connect_opts: [observer: self(), control: control]
       )

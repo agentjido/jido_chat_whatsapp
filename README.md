@@ -94,8 +94,7 @@ route envelopes with `Jido.Chat.route_event/4`. Lifecycle uses `:action` envelop
 action ID `"connection_update"`, and `metadata.category: :connection_lifecycle`.
 Metadata includes profile, attempt, originating worker source, event, status, QR
 and sanitized identity fields. Treat the sink as a confidential QR display boundary;
-lifecycle must never become a message or invoke an agent. The old
-`lifecycle_sink_mfa` option is ignored and must be removed. Existing hosts need the
+lifecycle must never become a message or invoke an agent. Existing hosts need the
 [consumer migration](docs/adapter_contracts.md#zaq-migration-handoff-work-fqt)
 before adopting this change; ZAQ is not yet compatible.
 Only socket open reports `:connected`; pairing success reports `:authenticating`.
@@ -203,7 +202,7 @@ for a QR challenge and authenticated account, then explicitly confirm its
 Trusted host callbacks receive package-encoded credentials and return an opaque
 binding. The package prepares storage options, seeds volatile state, and invokes
 the host's existing activation callback. `runtime_pending: true` still means the
-connector is saved. The legacy `PairingSession.execute/3` API remains compatible.
+connector is saved. Both authentication entry points use the same `sink_mfa` for private pairing and storage requests.
 See [shared authentication and host handoff](docs/adapter_contracts.md#shared-authentication-capability-work-9ya)
 for callback shapes and migration details.
 

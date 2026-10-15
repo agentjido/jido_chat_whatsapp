@@ -12,8 +12,7 @@ defmodule Jido.Chat.WhatsApp.PairingSessionTest do
       supervisor: supervisor,
       attempt_id: "attempt",
       context: host,
-      persist_mfa: {__MODULE__, :persist, []},
-      start_mfa: {__MODULE__, :start_runtime, []},
+      sink_mfa: {__MODULE__, :host_request, []},
       transport: __MODULE__,
       connect_opts: [observer: self()]
     ]
@@ -89,13 +88,31 @@ defmodule Jido.Chat.WhatsApp.PairingSessionTest do
   end
 
   test "malformed runtime handoff cannot lose an already persisted receipt", %{opts: opts, host: host} do
-    opts = Keyword.put(opts, :persist_mfa, {__MODULE__, :malformed_handoff, []})
+    opts = Keyword.put(opts, :sink_mfa, {__MODULE__, :host_request, [:malformed]})
     {:ok, %{session: session}} = PairingSession.execute(%{op: :begin, owner: self()}, :operator, opts)
     assert_confirmable(session)
     assert {:ok, %{saved: %{runtime_pending: true} = saved}} = command(session, :confirm)
     assert {:ok, %{saved: ^saved}} = command(session, :confirm)
     assert Agent.get(host, &{&1.saves, &1.starts}) == {1, 0}
   end
+
+  def host_request(
+        :malformed,
+        %Jido.Chat.WhatsApp.Pairing.Request{context: host, request: %{op: :persist} = request},
+        _opts
+      ),
+      do: malformed_handoff(host, Map.delete(request, :op))
+
+  def host_request(:malformed, event, opts), do: host_request(event, opts)
+
+  def host_request(%Jido.Chat.WhatsApp.Pairing.Request{context: host, request: %{op: :persist} = request}, _opts),
+    do: persist(host, Map.delete(request, :op))
+
+  def host_request(%Jido.Chat.WhatsApp.Pairing.Request{context: host, request: %{op: :start, runtime: runtime}}, _opts),
+    do: start_runtime(host, runtime)
+
+  def host_request(%Jido.Chat.WhatsApp.Storage.Request{binding: host, request: request}, _opts),
+    do: document(host, request)
 
   def malformed_handoff(host, request) do
     {:ok, result} = persist(host, request)
@@ -134,7 +151,7 @@ defmodule Jido.Chat.WhatsApp.PairingSessionTest do
   end
 
   defp storage_options(host),
-    do: [scope: host, profile: "saved", context: host, document_mfa: {__MODULE__, :document, []}]
+    do: [scope: host, profile: "saved", context: host, sink_mfa: {__MODULE__, :host_request, []}]
 
   defp command(pid, op, owner \\ :operator), do: PairingSession.execute(%{op: op, session: pid}, owner, [])
   defp assert_confirmable(pid, tries \\ 100)

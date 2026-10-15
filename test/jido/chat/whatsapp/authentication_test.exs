@@ -29,9 +29,7 @@ defmodule Jido.Chat.WhatsApp.AuthenticationTest do
       owner: self(),
       attempt_id: "attempt",
       context: context,
-      persist_mfa: {__MODULE__, :persist, []},
-      start_mfa: {__MODULE__, :activate, []},
-      document_mfa: {__MODULE__, :document, []},
+      sink_mfa: {__MODULE__, :host_request, [context]},
       transport: __MODULE__,
       connect_opts: [host: host, observer: self()]
     ]
@@ -210,6 +208,23 @@ defmodule Jido.Chat.WhatsApp.AuthenticationTest do
   def recovery_status(_), do: :reconnecting
   def account_identity(host), do: {:ok, Agent.get(host, & &1.identity)}
 
+  def host_request(
+        _configured,
+        %Jido.Chat.WhatsApp.Pairing.Request{context: context, request: %{op: :persist} = request},
+        _opts
+      ),
+      do: persist(context, Map.delete(request, :op))
+
+  def host_request(
+        _configured,
+        %Jido.Chat.WhatsApp.Pairing.Request{context: context, request: %{op: :start, runtime: runtime}},
+        _opts
+      ),
+      do: activate(context, runtime)
+
+  def host_request(context, %Jido.Chat.WhatsApp.Storage.Request{binding: binding, request: request}, _opts),
+    do: document(context, binding, request)
+
   # Host callbacks never call PairingSession or Split.
   def persist(%{host: host}, request) do
     mode =
@@ -260,7 +275,7 @@ defmodule Jido.Chat.WhatsApp.AuthenticationTest do
 
   def activate(context, %{connection_options: config, binding: binding, runtime: :host_config}) do
     Agent.update(context.host, &%{&1 | starts: &1.starts + 1})
-    assert config == Adapter.connection_options(binding, context: context, document_mfa: {__MODULE__, :document, []})
+    assert config == Adapter.connection_options(binding, sink_mfa: {__MODULE__, :host_request, [context]})
 
     case Agent.get(context.host, & &1.mode) do
       :activation_failed ->

@@ -6,7 +6,7 @@ defmodule Jido.Chat.WhatsApp.Storage.Request do
   Hosts must accept them only on their explicitly configured runtime sink,
   authorize each operation, and acknowledge writes after commit. Binding data
   is opaque to the package. Timeout is ambiguous; callers must not retry writes
-  automatically. Legacy document callbacks remain available for other hosts.
+  automatically.
   """
 
   @derive {Inspect, only: [:version, :id]}
@@ -31,14 +31,6 @@ defmodule Jido.Chat.WhatsApp.Storage.Request do
   end
 
   def call(_, _, _), do: {:error, :invalid_storage_request}
-
-  @doc "Adapts the existing Split document callback to the synchronous sink contract."
-  @spec document(tuple(), term(), map()) :: term()
-  def document(sink, binding, request), do: call(sink, binding, request)
-
-  @doc "Accepts Split's legacy host context while preserving the configured runtime sink."
-  @spec document(tuple(), term(), term(), map()) :: term()
-  def document(sink, _context, binding, request), do: call(sink, binding, request)
 
   defp invoke(module, function, args, event) do
     case apply(module, function, args ++ [event, []]) do

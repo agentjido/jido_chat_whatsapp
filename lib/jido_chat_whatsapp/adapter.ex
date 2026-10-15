@@ -68,7 +68,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   @spec authenticate(map(), term(), keyword()) :: Jido.Chat.Adapter.authentication_result()
   def authenticate(request, owner_id, opts), do: PairingSession.authenticate(request, owner_id, opts)
 
-  @doc "Prepares saved transport configuration from an opaque binding and trusted document callback."
+  @doc "Prepares saved transport configuration from an opaque binding and trusted sink."
   @spec connection_options(term(), keyword()) :: map()
   def connection_options(binding, opts) do
     storage = Split.binding_options(binding, opts)
@@ -80,7 +80,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   def prepare_connection(opts) do
     with {:ok, binding} when not is_nil(binding) <-
            Jido.Chat.WhatsApp.Storage.Request.call(opts[:sink_mfa], nil, %{op: :bind}),
-         options <- connection_options(binding, Keyword.put(opts, :context, :runtime)),
+         options <- connection_options(binding, opts),
          {module, storage_opts} <- options.storage,
          :ok <- module.prepare(module.new(storage_opts)) do
       {:ok, Map.merge(options, %{mode: :linked_device, sync_history: false, sync_full_history: false})}

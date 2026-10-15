@@ -562,20 +562,17 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert %{status: 400} = Adapter.format_webhook_response({:error, :bad_payload})
   end
 
-  test "listener preserves custom storage and ignores the removed lifecycle option" do
+  test "listener preserves custom storage over storage_root" do
     storage = {MyApp.Storage, tenant: "isolated"}
-    sink = {MyApp.Status, :emit, []}
 
     assert {:ok, [spec]} =
              Adapter.listener_child_specs("isolated",
                sink_mfa: {MyApp.Ingress, :emit, []},
-               lifecycle_sink_mfa: sink,
                ingress: %{mode: :linked_device, profile: "isolated", storage: storage, storage_root: "/unused"}
              )
 
     {_, _, [opts]} = spec.start
     assert opts[:config].storage == storage
-    refute Keyword.has_key?(opts, :lifecycle_sink_mfa)
   end
 
   test "listener_child_specs/2 returns linked-device worker spec" do

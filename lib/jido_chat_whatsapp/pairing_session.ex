@@ -11,11 +11,12 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
 
   The host authorizes every API call and supplies an opaque non-nil owner ID.
   Begin options include a host DynamicSupervisor, stable attempt ID, context,
-  persist_mfa and start_mfa. Both callbacks receive context as their first extra
-  argument. Persistence receives %{attempt_id: id, identity: identity, records:
-  durable_records} and must be idempotent for the attempt ID. Success returns
+  and sink_mfa. The sink receives private Pairing.Request structs containing the
+  context and an operation. Persistence receives %{op: :persist, attempt_id: id,
+  identity: identity, records: durable_records} and must be idempotent for the
+  attempt ID. Success returns
   {:ok, %{receipt: public_map, storage: split_backend_options, runtime: opaque}}.
-  The start callback receives that opaque runtime and returns :ok or an error.
+  The start request carries %{op: :start, runtime: opaque} and returns :ok or an error.
   Receipt fields are public; snapshots and host context never enter status.
   Callbacks are bounded to ten seconds and the remaining pairing lifetime.
   A timed-out durable callback may have committed: retry the same attempt ID.
@@ -23,10 +24,11 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   `authenticate/3` adapts the shared contract to this same session machinery.
   Shared persistence receives normalized account/encoded credentials and returns
   an opaque binding. Storage conversion and seeding remain package-owned; legacy
-  `execute/3` callbacks and results retain their existing shapes.
+  `execute/3` payloads and results retain their existing shapes inside the requests.
   """
   use GenServer, restart: :temporary
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker, Pairing}
+  alias Jido.Chat.WhatsApp.Pairing.Request
   alias Jido.Chat.WhatsApp.Storage.{Split, Temporary}
 
   @doc "Starts a provisional session with trusted host callbacks and explicit ownership."
@@ -120,11 +122,8 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
       user_id: Keyword.fetch!(opts, :owner_id),
       owner_ref: owner_ref,
       context: Keyword.fetch!(opts, :context),
-      persist_mfa: Keyword.fetch!(opts, :persist_mfa),
-      start_mfa: Keyword.fetch!(opts, :start_mfa),
       contract: Keyword.get(opts, :contract, :legacy),
-      document_mfa: Keyword.get(opts, :document_mfa),
-      sink_mfa: Keyword.get(opts, :sink_mfa),
+      sink_mfa: Keyword.fetch!(opts, :sink_mfa),
       adapter: Keyword.get(opts, :adapter, Adapter),
       transport: Keyword.get(opts, :transport, Jido.Chat.WhatsApp.Transport.AmarulaClient),
       connect_opts: Keyword.get(opts, :connect_opts, []),
@@ -341,7 +340,7 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   defp persist(state) do
     request = persistence_request(state)
 
-    case callback(state.persist_mfa, [state.context, request], state.deadline) do
+    case host_request(state, Map.put(request, :op, :persist)) do
       {:ok, %{receipt: receipt} = result} when state.contract == :shared and is_map(receipt) ->
         saved(state, Pairing.public_receipt(receipt), shared_handoff(state, result))
 
@@ -374,7 +373,8 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
     config =
       Adapter.connection_options(
         binding,
-        [context: state.context, volatile_namespaces: state.namespaces] ++ storage_callback(state)
+        sink_mfa: state.sink_mfa,
+        volatile_namespaces: state.namespaces
       )
 
     {Split, storage_opts} = config.storage
@@ -387,15 +387,15 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
 
   defp handoff(state, storage_opts, runtime) do
     with :ok <- bounded(fn -> Split.seed(Split.new(storage_opts), state.snapshot) end, state.deadline),
-         do: callback(state.start_mfa, [state.context, runtime], state.deadline)
+         do: host_request(state, %{op: :start, runtime: runtime})
   rescue
     _ -> {:error, :runtime_unavailable}
   catch
     _, _ -> {:error, :runtime_unavailable}
   end
 
-  defp callback({module, function, args}, values, deadline) do
-    bounded(fn -> apply(module, function, args ++ values) end, deadline)
+  defp host_request(state, request) do
+    bounded(fn -> Request.call(state.sink_mfa, state.context, request) end, state.deadline)
   end
 
   defp bounded(fun, deadline) do
@@ -431,10 +431,8 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   defp valid_options?(opts) do
     Keyword.keyword?(opts) and is_pid(opts[:owner]) and not is_nil(opts[:owner_id]) and
       is_binary(opts[:attempt_id]) and byte_size(opts[:attempt_id]) in 1..128 and
-      Keyword.has_key?(opts, :context) and valid_callback?(opts[:persist_mfa]) and
-      (Keyword.get(opts, :contract, :legacy) == :legacy or valid_callback?(opts[:sink_mfa]) or
-         valid_callback?(opts[:document_mfa])) and
-      valid_callback?(opts[:start_mfa]) and is_integer(Keyword.get(opts, :ttl_ms, 180_000)) and
+      Keyword.has_key?(opts, :context) and valid_callback?(opts[:sink_mfa]) and
+      is_integer(Keyword.get(opts, :ttl_ms, 180_000)) and
       Keyword.get(opts, :ttl_ms, 180_000) in 1..600_000
   end
 
@@ -442,7 +440,4 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
     do: is_atom(module) and not is_nil(module) and is_atom(function) and is_list(args)
 
   defp valid_callback?(_), do: false
-
-  defp storage_callback(%{sink_mfa: sink}) when not is_nil(sink), do: [sink_mfa: sink]
-  defp storage_callback(state), do: [document_mfa: state.document_mfa]
 end

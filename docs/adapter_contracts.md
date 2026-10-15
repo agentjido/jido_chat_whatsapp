@@ -174,11 +174,9 @@ without raw logging or retry. There is no durable delivery, timeout or queue bou
 hosts must keep callbacks short and bound startup readiness. A blocked callback
 blocks later lifecycle delivery, not worker status/expiry processing.
 
-This intentionally supersedes work-5rb.3. `lifecycle_sink_mfa` is no longer wired,
-validated or invoked (a supplied legacy option is ignored). Remove it and migrate
-the existing sink before switching dependencies; lifecycle now reaches that sink
-even when no separate lifecycle callback was configured. No duplicate delivery or
-legacy plain-map lifecycle callback is provided.
+The existing `sink_mfa` receives lifecycle action envelopes alongside chat
+payloads. Hosts must handle the lifecycle metadata described above before
+switching dependencies.
 
 QR expiry sets `status: :expired` and `qr: nil` in both the `:qr_expired`
 notification and subsequent `ConnectionWorker.status/1` snapshots (`event:
@@ -336,50 +334,52 @@ storage_opts = [
   profile: "support",
   scope: {tenant_id, credential_id},
   context: binding,
-  document_mfa: {MyHost.WhatsApp, :document, []},
+  sink_mfa: {MyHost.Ingress, :emit, []},
   volatile_namespaces: ["session", "sender_key"]
 ]
 
 storage = {Jido.Chat.WhatsApp.Storage.Split, storage_opts}
 ```
 
-The document callback receives `(context, request)`. Requests use `:get`, `:put`,
-`:delete`, `:clear`, `:list_keys` and `:delete_namespace`, with string namespaces
-and Base64-encoded uncompressed Erlang term keys/values. It must authorize every
-request and provide encryption/transactional durability. A `:list_keys` request
-for `"__binding_check__"` must return `{:ok, []}` only when the binding is current;
-the composite backend uses this before RAM operations. Use `:error` only for a
-missing record; failures return `{:error, reason}`. `clear` clears this binding's
-durable state. `Split.prepare/1` removes obsolete durable volatile namespaces;
-`Split.seed/2` authorizes and seeds volatile records once. No stale disk fallback
-or late snapshot resurrection is allowed. Host scope must distinguish credential
-generations as well as tenants. These are trusted code APIs, not public endpoints.
+The sink receives a private `Storage.Request` struct with `binding` and `request`
+fields, followed by callback options. Requests use `:get`, `:put`, `:delete`,
+`:clear`, `:list_keys` and `:delete_namespace`, with string namespaces and
+Base64-encoded uncompressed Erlang term keys/values. The host must authorize every
+request and provide encryption and transactional durability. A `:list_keys`
+request for `"__binding_check__"` returns `{:ok, []}` only when the binding is current;
+the backend checks this before RAM operations. Use `:error` only for missing
+records; failures return `{:error, reason}`. `Split.prepare/1` removes obsolete
+durable volatile namespaces. `Split.seed/2` authorizes and seeds RAM records once.
+Host scope must distinguish credential generations and tenants.
 
 For managed onboarding, call `PairingSession.execute(request, owner_id, opts)`
 only after host authorization. Begin request is `%{op: :begin, owner: browser_pid}`;
 later requests are `%{op: :status | :retry | :cancel | :confirm, session: pid}`.
-Begin options require `:supervisor`, stable binary `:attempt_id`, `:context`,
-`:persist_mfa` and `:start_mfa`. Optional `:ttl_ms` defaults to 180,000 (maximum
-600,000); `:adapter`, `:transport` and `:connect_opts` support transport injection.
-Owner ID must be non-nil and match on subsequent calls. Owner process loss or
-expiry discards temporary state. The host must reauthorize every command.
+Begin options require `:supervisor`, stable binary `:attempt_id`, `:context`, and
+`:sink_mfa`. Optional `:ttl_ms` defaults to 180,000 (maximum 600,000); `:adapter`,
+`:transport` and `:connect_opts` support transport injection. Owner ID must be
+non-nil and match on subsequent calls. Owner process loss or expiry discards
+temporary state. The host must reauthorize every command.
 
-Persistence MFA receives `(context, %{attempt_id: id, identity: identity,
-records: durable_snapshot})`. It must atomically and idempotently save by attempt
+The sink receives a redacted `Pairing.Request` struct containing the configured
+`context` and a `request` map, followed by callback options. For `execute/3`,
+persistence carries `%{op: :persist, attempt_id: id, identity: identity,
+records: durable_snapshot}`. The host saves atomically and idempotently by attempt
 ID, returning `{:ok, %{receipt: public_receipt, storage: split_storage_opts,
-runtime: opaque_runtime_context}}`. The package stops protocol writes before
-freezing; on save failure it retains that snapshot for retry. The start MFA
-receives `(context, opaque_runtime_context)` after one-time RAM seeding and
-returns `:ok` or an error. A saved receipt includes `runtime_pending: true` if
-seeding/start fails: persistence has already succeeded. Confirmation never requires
-re-pairing merely because runtime startup failed. Duplicate confirmation returns
-the same saved receipt.
+runtime: opaque_runtime_context}}`. Split options use the same trusted sink.
+The package stops protocol writes before freezing and retains the snapshot after
+a failed save. After one-time RAM seeding, the sink receives
+`%{op: :start, runtime: opaque_runtime_context}` and returns `:ok` or an error.
+A saved receipt includes `runtime_pending: true` if seeding or activation fails.
+Duplicate confirmation returns the same saved receipt without repeating the save.
 
-Callbacks run in bounded tasks (at most ten seconds and the remaining lifetime).
-A timeout may leave an uncertain durable commit: retries must reuse the attempt
-ID. The package never knows the host's users, SQL schema or encryption system.
-Public receipts must not contain secrets. QR/status is for trusted display only;
-raw snapshots and callback context are redacted from process status and errors.
+Pairing requests run in bounded tasks (at most ten seconds and the remaining
+session lifetime). A timeout may leave an uncertain durable commit: explicit
+retries must reuse the attempt ID. Context, credentials and callback errors are
+redacted. The package does not know the host's users, SQL schema or encryption.
+QR/status is for trusted display only. Both authentication entry points use the
+same sink; private requests never pass through public event routing or serialized
+message State.
 
 For rollout, stop existing/provisional connections before switching store ownership.
 Do not copy live volatile sessions or run parallel old/new writers. Retain host
@@ -534,8 +534,8 @@ ZAQ currently registers no lifecycle action handler and its synchronous envelope
 `State.handle_call` discards the routed Chat state. It is **not compatible yet**.
 Before switching the dependency, ZAQ must:
 
-1. Remove `lifecycle_sink_mfa` configuration and route typed envelopes through
-   the existing `sink_mfa`; leave plain chat normalization on its existing path.
+1. Route typed envelopes through the existing `sink_mfa`; leave plain chat
+   normalization on its existing path.
 2. Register `on_action("connection_update", ...)` with adapter/category guards.
    Preserve `result.chat` and apply status/QR/identity to the owning State before
    replying to `process_listener_payload`'s `GenServer.call`. Do not call that same
@@ -593,33 +593,35 @@ states or duplicating provider messages. QR appears only during pairing.
 
 The optional `:authenticate` capability uses `Jido.Chat.Adapter.authenticate/4`.
 See the core `guides/authentication.md` for the provider-neutral schema. WhatsApp
-implements it through the existing `PairingSession`; `execute/3` and its legacy
-`identity/records`, `storage/runtime`, PID handles and status shapes stay supported.
+implements it through the existing `PairingSession`; `execute/3` retains its
+`identity/records`, `storage/runtime`, PID handles and status shapes.
 The shared path opts into translation, not another session runtime.
 
 Begin trusted options are `:supervisor`, `:owner` (monitored PID), `:attempt_id`,
-`:context`, `:persist_mfa`, `:start_mfa`, and `:document_mfa`; transport/connect
-options and bounded `:ttl_ms` retain their existing meaning. `:document_mfa`
-receives configured arguments followed by `(context, binding, request)` and must
-validate the binding on every operation, including `__binding_check__` before
-volatile seeding/access. The binding is a stable opaque host term, not nil.
-The package derives a stable profile and RAM scope from it and prepares the Split
-backend. Hosts use `Adapter.connection_options(binding, trusted_opts)` for saved
-startup, passing the result as their listener ingress config; no Split construction
-or record encoding belongs in generic host pairing code.
+`:context`, and `:sink_mfa`. Transport/connect options and bounded `:ttl_ms`
+retain their existing meaning. The same sink receives private `Pairing.Request`
+and `Storage.Request` structs with distinct operation contracts.
 
-Persistence receives normalized `account` and already encoded `credentials`.
-Activation receives the opaque `runtime`, `binding` and prepared
-`connection_options`. A receipt is retained even if binding validation/seeding or
-activation fails. Only allowlisted receipt fields reach shared status. The old
-host callbacks are unchanged and still receive unencoded `records` and return
-concrete `storage` options until that host migrates. Lifecycle delivery continues
-on the single `sink_mfa` using existing connection_update ActionEvents.
+For shared authentication, the pairing persistence request contains
+`%{op: :persist, attempt_id: id, account: normalized_account,
+credentials: encoded_credentials}`. The host returns
+`{:ok, %{receipt: public_receipt, binding: opaque_binding, runtime: opaque_runtime}}`.
+The binding must be stable and non-nil. The package derives the profile and RAM
+scope, prepares Split storage options with the same sink, and authorizes RAM seeding.
+Hosts use `Adapter.connection_options(binding, sink_mfa: trusted_sink)` for saved
+startup; generic host pairing code does not construct Split options or encode records.
+
+The activation request contains `%{op: :start, runtime: %{runtime: opaque_runtime,
+binding: binding, connection_options: options}}`. A receipt is retained even if
+binding validation, seeding or activation fails. Only allowlisted receipt fields
+reach shared status. The `execute/3` entry point retains its identity/records and
+storage/runtime payload shapes inside the same typed requests. Lifecycle delivery
+continues through the configured sink using `connection_update` ActionEvents.
 
 ### Host activation example
 
 ```elixir
-# In the trusted start_mfa callback, after host authorization:
+# In the trusted sink handling a Pairing.Request with op: :start:
 # payload = %{binding: binding, runtime: saved_config, connection_options: options}
 ingress = Map.merge(payload.connection_options, %{mode: :linked_device})
 # Feed ingress into the host's existing saved-listener startup/sync operation.
@@ -630,7 +632,7 @@ The options' `profile` and `storage` belong at the ingress top level. Preserve
 both unchanged. The opaque binding must remain stable across host restarts (use
 persistent tenant/configuration/credential IDs, not process IDs or transient
 actor context). `connection_options/2` deterministically reconstructs the same
-profile and scope. The document callback must reject revoked or mismatched
+profile and scope. The sink must reject revoked or mismatched
 bindings; a non-nil binding alone is not authorization. Encoded credentials retain
 the existing tuple-keyed map format for BEAM dispatch; they are not JSON records.
 
@@ -644,9 +646,8 @@ its durable idempotency record before starting another onboarding attempt.
 
 ## Private synchronous storage requests
 
-Hosts may provide `sink_mfa` instead of `document_mfa` when constructing saved
-connection options or shared authentication. `Adapter.prepare_connection/1`
-requests an opaque binding with `op: :bind`, derives the existing stable profile,
+Hosts provide `sink_mfa` for saved connection options and shared authentication.
+`Adapter.prepare_connection/1` requests an opaque binding with `op: :bind`, derives the existing stable profile,
 and prepares split storage before listener registration. The configured sink
 receives a private `Storage.Request` struct and options, and returns the existing
 `:ok`, `:error`, `{:ok, value}`, or `{:error, reason}` result after host persistence
@@ -667,9 +668,7 @@ must not trigger an automatic retry or overwrite of state. Hosts should make
 writes idempotent and acknowledge only after commit. Task termination does not
 undo a transaction already committed remotely.
 
-Legacy `document_mfa` remains supported for existing hosts; `sink_mfa` takes
-precedence when both are supplied, without dual writes. Stored encoding and
-binding-derived profiles are unchanged. Pairing confirmation retains its existing
-persist/start authorization callbacks and uses the same storage sink for RAM
-handoff and subsequent saved runtime operations. `storage_runtime_spec/1` lets
-hosts supply deployment policy while the package owns runtime implementation.
+Pairing confirmation and saved runtime storage use the same configured sink.
+`storage_runtime_spec/1` lets hosts supply deployment policy while the package
+owns runtime implementation. Pairing requests use their separate ten-second
+session deadline; storage requests retain the seven-second deadline above.
