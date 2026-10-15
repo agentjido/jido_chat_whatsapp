@@ -7,8 +7,19 @@
 Linked-device media ingress emits a normalized `EventEnvelope` containing an
 `Incoming` with public attachment metadata and an opaque
 `whatsapp://media/v1/...` reference in `media.url` and `media.metadata.file_id`.
-Private download descriptors are removed from media metadata and both `raw`
-maps are empty. Hosts preserve the reference unchanged and call
+Private download descriptors are removed from media metadata. Both `Incoming.raw`
+and `EventEnvelope.raw` contain exactly the allowlisted conversation facts
+`%{channel_jid: external_room_id, from_jid: external_user_id, timestamp: timestamp}`,
+projected from normalized attributes rather than copied from the provider payload.
+This replaces the previous empty media `raw` maps. Room and sender use normalized
+JIDs (including connection-scoped sender canonicalization on listener ingress).
+Missing senders remain `nil`; timestamps are Unix seconds, with numeric strings
+normalized to integers and missing or malformed raw timestamps represented as
+`nil`. No unit conversion or receive-time substitution occurs. Hosts must still
+verify that `channel_jid` matches the expected room and validate its conversation
+type; these facts do not grant authorization. Non-media and legacy no-options
+normalization retain their existing behavior. Hosts preserve the reference
+unchanged and call
 `Adapter.fetch_media(reference, profile: profile)` using the originating
 configuration, just as they supply the originating Telegram bot token.
 Hosts must still enforce authorization before fetching; reference possession

@@ -130,7 +130,8 @@ defmodule Jido.Chat.WhatsApp.Adapter do
 
   Supplying `:conn`, `:connection` or `:profile` seals media descriptors through
   the transport. Only public media metadata and an opaque reference leave this
-  boundary; raw media payloads are omitted. The listener always uses this mode.
+  boundary; `raw` retains only normalized room, sender and timestamp facts.
+  The listener always uses this mode.
   Without connection options, the legacy structured-reference API is preserved.
   """
   @spec transform_incoming(term(), keyword()) :: {:ok, Incoming.t()} | {:error, term()}
@@ -460,7 +461,13 @@ defmodule Jido.Chat.WhatsApp.Adapter do
 
       with {:ok, conn} <- client.resolve_conn(opts),
            {:ok, media} <- seal_media_entries(attrs.media, client, conn) do
-        {:ok, %{attrs | media: media, raw: %{}}}
+        facts = %{
+          channel_jid: attrs.external_room_id,
+          from_jid: attrs.external_user_id,
+          timestamp: if(is_integer(attrs.timestamp), do: attrs.timestamp)
+        }
+
+        {:ok, %{attrs | media: media, timestamp: facts.timestamp, raw: facts}}
       end
     else
       {:ok, attrs}

@@ -50,6 +50,8 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
       channel_jid: "15550001@s.whatsapp.net",
       from_jid: "15550002@s.whatsapp.net",
       type: :media,
+      timestamp: 1_700_000_000,
+      unrelated: %{secret: "unrelated-secret"},
       content: %{
         kind: kind,
         caption: "Attachment caption",
@@ -75,9 +77,10 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
       assert incoming.text == "Attachment caption"
       assert "whatsapp://media/v1/" <> _ = media.url
       assert media.metadata == %{file_id: media.url}
-      assert incoming.raw == %{}
+      assert incoming.raw == facts(payload(kind))
       refute inspect(incoming) =~ "private-download-path"
       refute inspect(incoming) =~ "media_key"
+      refute inspect(incoming) =~ "unrelated-secret"
 
       for reference <- [media.url, media, %{url: media.url}, %{"metadata" => %{"file_id" => media.url}}] do
         assert {:ok, "downloaded bytes"} = Adapter.fetch_media(reference, conn: conn, transport: Transport)
@@ -85,6 +88,50 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
         assert descriptor.media_key == payload(kind).content.media_key
         assert descriptor.file_enc_sha256 == payload(kind).content.file_enc_sha256
       end
+    end
+  end
+
+  defp facts(payload) do
+    %{channel_jid: payload.channel_jid, from_jid: payload.from_jid, timestamp: payload.timestamp}
+  end
+
+  test "manual sealed media projects normalized DM and group facts into both public maps" do
+    conn = protocol("facts", :crypto.strong_rand_bytes(32))
+
+    for {room, type} <- [{"15550001@s.whatsapp.net", :dm}, {"12000001@g.us", :group}] do
+      input = %{payload() | channel_jid: room, timestamp: "1700000000"}
+      expected = %{channel_jid: room, from_jid: input.from_jid, timestamp: 1_700_000_000}
+      assert {:ok, incoming} = Adapter.transform_incoming(input, conn: conn, transport: Transport)
+      assert incoming.raw == expected
+      assert incoming.external_room_id == room
+      assert incoming.external_user_id == expected.from_jid
+      assert incoming.chat_type == type
+      assert incoming.timestamp == expected.timestamp
+
+      request = WebhookRequest.new(%{adapter_name: :whatsapp, payload: input})
+      assert {:ok, %EventEnvelope{} = envelope} = Adapter.parse_event(request, conn: conn, transport: Transport)
+      assert envelope.raw == expected
+      assert envelope.payload.raw == expected
+      refute inspect(envelope) =~ "private-download-path"
+      refute inspect(envelope) =~ "media_key"
+      refute inspect(envelope) =~ "unrelated-secret"
+    end
+  end
+
+  test "missing sender and missing or malformed timestamps cannot add nested raw facts" do
+    conn = protocol("missing-facts", :crypto.strong_rand_bytes(32))
+
+    for timestamp <- [nil, "invalid", %{secret: "nested-secret"}, ["invalid"]] do
+      input = %{payload() | from_jid: nil, timestamp: timestamp}
+      assert {:ok, incoming} = Adapter.transform_incoming(input, conn: conn, transport: Transport)
+      assert incoming.raw == %{channel_jid: input.channel_jid, from_jid: nil, timestamp: nil}
+      assert incoming.timestamp == nil
+      refute inspect(incoming) =~ "nested-secret"
+    end
+
+    for room <- [nil, %{}, "invalid"] do
+      assert {:error, _} =
+               Adapter.transform_incoming(%{payload() | channel_jid: room}, conn: conn, transport: Transport)
     end
   end
 
@@ -131,34 +178,42 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
              Adapter.fetch_media(hd(incoming.media).url, conn: invalid, transport: Transport)
   end
 
-  test "linked-device ingress delivers a normalized envelope without download secrets" do
-    conn = protocol("one", :crypto.strong_rand_bytes(32))
+  for room <- ["15550001@s.whatsapp.net", "12000001@g.us"] do
+    @room room
+    test "linked-device ingress preserves safe facts without download secrets for #{@room}" do
+      conn = protocol("one", :crypto.strong_rand_bytes(32))
 
-    start_supervised!(
-      {ConnectionWorker,
-       bridge_id: "media",
-       sink_mfa: {Sink, :emit, [self()]},
-       transport: Transport,
-       config: %{profile: "one", conn: conn, test_pid: self(), sync_history: false}}
-    )
+      start_supervised!(
+        {ConnectionWorker,
+         bridge_id: "media",
+         sink_mfa: {Sink, :emit, [self()]},
+         transport: Transport,
+         config: %{profile: "one", conn: conn, test_pid: self(), sync_history: false}}
+      )
 
-    assert_receive {:receiver, receiver}
+      assert_receive {:receiver, receiver}
 
-    message = %Amarula.Msg{
-      id: "media-1",
-      type: :media,
-      raw: %{},
-      channel: "15550001@s.whatsapp.net",
-      from: "15550002@s.whatsapp.net",
-      content: struct!(Amarula.Content.Media, payload().content)
-    }
+      message = %Amarula.Msg{
+        id: "media-1",
+        type: :media,
+        raw: %{},
+        channel: @room,
+        timestamp: 1_700_000_000,
+        from: "15550002@s.whatsapp.net",
+        content: struct!(Amarula.Content.Media, payload().content)
+      }
 
-    send(receiver, {:amarula, :messages_upsert, %{messages: [message]}})
-    assert_receive {:ingress, %EventEnvelope{event_type: :message, payload: incoming} = envelope}, 1_000
-    assert envelope.raw == %{}
-    assert incoming.raw == %{}
-    assert {:ok, "downloaded bytes"} = Adapter.fetch_media(hd(incoming.media).url, conn: conn, transport: Transport)
-    assert_received {:download, %Amarula.Content.Media{}}
+      send(receiver, {:amarula, :messages_upsert, %{messages: [message]}})
+      assert_receive {:ingress, %EventEnvelope{event_type: :message, payload: incoming} = envelope}, 1_000
+      expected = %{channel_jid: @room, from_jid: "15550002@s.whatsapp.net", timestamp: 1_700_000_000}
+      assert envelope.raw == expected
+      assert incoming.raw == expected
+      refute inspect(envelope) =~ "private-download-path"
+      refute inspect(envelope) =~ "media_key"
+      assert incoming.chat_type == if(String.ends_with?(@room, "@g.us"), do: :group, else: :dm)
+      assert {:ok, "downloaded bytes"} = Adapter.fetch_media(hd(incoming.media).url, conn: conn, transport: Transport)
+      assert_received {:download, %Amarula.Content.Media{}}
+    end
   end
 
   test "parse_event propagates normalization failures instead of exposing a raw descriptor" do
