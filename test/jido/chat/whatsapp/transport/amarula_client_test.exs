@@ -1,5 +1,6 @@
 defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
   use Jido.Chat.WhatsApp.RuntimeCase, async: false
+  use ExUnitProperties
 
   import ExUnit.CaptureLog
 
@@ -21,6 +22,53 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
 
     assert {:error, :connection_not_running} =
              AmarulaClient.resolve_conn(profile: :"missing_#{System.unique_integer()}")
+  end
+
+  test "sender normalization uses only the originating connection's PN to LID mapping" do
+    profile = :"sender_mapping_#{System.unique_integer([:positive])}"
+    {:ok, conn} = Amarula.Testing.start_offline(profile: profile, parent_pid: self(), frame_sink: self())
+    on_exit(fn -> Amarula.stop(conn) end)
+    pn = "15550001111@s.whatsapp.net"
+    lid = "987654@lid"
+
+    assert {:ok, ^pn} = AmarulaClient.canonical_user_id(conn, pn)
+
+    assert {1, _} =
+             Amarula.Protocol.Signal.LidMappingFileStore.store_mappings(
+               Amarula.Connection.get_conn(conn),
+               [{lid, pn}]
+             )
+
+    assert {:ok, ^lid} = AmarulaClient.canonical_user_id(conn, pn)
+    assert {:ok, ^lid} = AmarulaClient.canonical_user_id(conn, "15550001111:3@s.whatsapp.net")
+    assert {:ok, ^lid} = AmarulaClient.canonical_user_id(conn, lid)
+    assert {:error, :invalid_user} = AmarulaClient.canonical_user_id(conn, nil)
+    assert {:error, :unavailable} = AmarulaClient.canonical_user_id(:missing_mapping_connection, pn)
+
+    other_profile = :"other_sender_mapping_#{System.unique_integer([:positive])}"
+    {:ok, other} = Amarula.Testing.start_offline(profile: other_profile, parent_pid: self(), frame_sink: self())
+    on_exit(fn -> Amarula.stop(other) end)
+    assert {:ok, ^pn} = AmarulaClient.canonical_user_id(other, pn)
+  end
+
+  property "mapped sender normalization is idempotent across device suffixes" do
+    profile = :"sender_property_#{System.unique_integer([:positive])}"
+    {:ok, conn} = Amarula.Testing.start_offline(profile: profile, parent_pid: self(), frame_sink: self())
+    on_exit(fn -> Amarula.stop(conn) end)
+
+    check all(user <- integer(10_000..99_999), device <- integer(1..99), max_runs: 15) do
+      pn = "1555#{user}@s.whatsapp.net"
+      lid = "9876#{user}@lid"
+
+      assert {1, _} =
+               Amarula.Protocol.Signal.LidMappingFileStore.store_mappings(
+                 Amarula.Connection.get_conn(conn),
+                 [{lid, pn}]
+               )
+
+      assert {:ok, ^lid} = AmarulaClient.canonical_user_id(conn, "1555#{user}:#{device}@s.whatsapp.net")
+      assert {:ok, ^lid} = AmarulaClient.canonical_user_id(conn, lid)
+    end
   end
 
   test "default transport can send through Amarula offline sandbox" do

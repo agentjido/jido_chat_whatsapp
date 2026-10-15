@@ -40,6 +40,9 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @callback account_jids(conn()) :: {:ok, [String.t()]} | {:error, term()}
   @callback user_phone(conn(), String.t()) :: {:ok, String.t() | nil} | {:error, term()}
 
+  @doc "Resolves a sender to a LID using this connection's verified mapping, retaining unmapped IDs."
+  @callback canonical_user_id(conn(), String.t()) :: {:ok, String.t()} | {:error, term()}
+
   @callback ensure_started(opts :: keyword()) :: :ok | {:error, term()}
   @callback connection_processes(conn()) :: {:ok, [pid()]} | {:error, term()}
   @callback connect(config :: map(), opts :: keyword()) :: {:ok, conn()} | {:error, term()}
@@ -86,6 +89,7 @@ defmodule Jido.Chat.WhatsApp.Transport do
               {:ok, String.t()} | {:error, term()}
 
   @optional_callbacks recovery_status: 1,
+                      canonical_user_id: 2,
                       media_reference: 2,
                       connection_processes: 1,
                       resolve_media_reference: 2,

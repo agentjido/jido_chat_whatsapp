@@ -75,6 +75,29 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     %{profile: Keyword.fetch!(storage, :profile), storage: {Split, storage}}
   end
 
+  @doc "Requests the saved binding and prepares storage before a listener is registered."
+  @spec prepare_connection(keyword()) :: {:ok, map()} | {:error, term()}
+  def prepare_connection(opts) do
+    with {:ok, binding} when not is_nil(binding) <-
+           Jido.Chat.WhatsApp.Storage.Request.call(opts[:sink_mfa], nil, %{op: :bind}),
+         options <- connection_options(binding, Keyword.put(opts, :context, :runtime)),
+         {module, storage_opts} <- options.storage,
+         :ok <- module.prepare(module.new(storage_opts)) do
+      {:ok, Map.merge(options, %{mode: :linked_device, sync_history: false, sync_full_history: false})}
+    else
+      {:ok, _} -> {:error, :invalid_binding}
+      error -> error
+    end
+  end
+
+  @doc "Returns the stable profile of a saved opaque binding without storage callbacks."
+  @spec connection_profile(term()) :: String.t()
+  def connection_profile(binding), do: Split.profile(binding)
+
+  @doc "Returns the shared package storage runtime with host-supplied deployment policy."
+  @spec storage_runtime_spec(keyword()) :: {module(), keyword()}
+  def storage_runtime_spec(opts), do: {Jido.Chat.WhatsApp.Storage.Runtime, opts}
+
   @impl true
   def listener_child_specs(bridge_id, opts \\ []) when is_binary(bridge_id) and is_list(opts) do
     ingress = normalize_ingress_opts(opts)

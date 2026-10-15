@@ -77,6 +77,30 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
 
   def user_phone(_, _), do: {:error, :invalid_user}
 
+  @impl true
+  def canonical_user_id(conn, jid) when is_binary(jid) do
+    case Message.normalize_jids([jid]) do
+      [normalized] ->
+        lid =
+          if String.ends_with?(normalized, "@s.whatsapp.net"),
+            do: Amarula.Contacts.lid_for_pn(conn, normalized)
+
+        case lid do
+          %Amarula.Address{kind: :lid} -> {:ok, Amarula.Address.to_jid!(lid)}
+          _ -> {:ok, normalized}
+        end
+
+      _ ->
+        {:error, :invalid_user}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  def canonical_user_id(_, _), do: {:error, :invalid_user}
+
   defp phone_from_jid(jid) when is_binary(jid) do
     case Regex.run(~r/^([0-9]+)@s\.whatsapp\.net$/, jid) do
       [_, number] -> "+" <> number

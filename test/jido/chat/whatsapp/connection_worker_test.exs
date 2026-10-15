@@ -33,6 +33,11 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     def resolve_conn(_opts), do: {:ok, self()}
 
     @impl true
+    def canonical_user_id(_conn, "15550001111@s.whatsapp.net"), do: {:ok, "987654@lid"}
+    def canonical_user_id(_conn, "15550002222@s.whatsapp.net"), do: {:error, :unavailable}
+    def canonical_user_id(_conn, jid), do: {:ok, jid}
+
+    @impl true
     def send_text(_conn, _jid, _text, _opts), do: {:ok, "msg"}
 
     @impl true
@@ -177,6 +182,60 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
       assert envelope.payload.user.user_id == "456@lid"
       assert envelope.payload.added == (emoji != "")
       assert envelope.payload.metadata.from_me == false
+    end
+  end
+
+  test "messages and reactions share the mapped sender identity without rewriting the reaction target" do
+    {_pid, parent, _profile} = worker()
+    room = "120363@g.us"
+
+    for sender <- [Address.pn("15550001111"), Address.lid("987654")] do
+      msg = %Msg{
+        id: "message",
+        channel: Address.group("120363"),
+        from: sender,
+        type: :text,
+        content: "hello",
+        raw: %Proto.Message{}
+      }
+
+      send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
+      assert_receive {:sink_emit, %{from_jid: "987654@lid", channel_jid: ^room}, _}
+
+      for emoji <- ["👍", ""] do
+        reaction = %{
+          msg
+          | type: :reaction,
+            content: %Amarula.Content.Reaction{key: {room, "target", false, "another@lid"}, emoji: emoji}
+        }
+
+        send(parent, {:amarula, :messages_upsert, %{messages: [reaction]}})
+        assert_receive {:sink_emit, %Jido.Chat.EventEnvelope{event_type: :reaction, payload: event}, _}
+        assert event.user.user_id == "987654@lid"
+        assert event.channel_id == room
+        assert event.message_id == "target"
+        assert event.emoji == emoji
+        assert event.added == (emoji != "")
+      end
+    end
+  end
+
+  test "unmapped and unavailable sender mappings retain the original identity" do
+    {_pid, parent, _profile} = worker()
+
+    for phone <- ["15550002222", "15550003333"] do
+      msg = %Msg{
+        id: "reaction",
+        channel: Address.group("120363"),
+        from: Address.pn(phone),
+        type: :reaction,
+        content: %Amarula.Content.Reaction{key: {"120363@g.us", "target", false}, emoji: "👍"},
+        raw: %Proto.Message{}
+      }
+
+      send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
+      assert_receive {:sink_emit, %Jido.Chat.EventEnvelope{event_type: :reaction, payload: event}, _}
+      assert event.user.user_id == phone <> "@s.whatsapp.net"
     end
   end
 

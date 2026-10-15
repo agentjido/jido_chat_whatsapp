@@ -30,9 +30,18 @@ WhatsApp CDN expiry can make old attachments unavailable. Version 1 references
 are limited to 24,000 bytes, with a maximum 16,384-byte private descriptor.
 
 Incoming push names are trimmed before they enter the canonical author and
-display-name fields. Blank and `~` placeholders become `nil`; external user IDs
-remain unchanged. Phone and LID enrichment remains connection-scoped through
-`Adapter.get_user/2`.
+display-name fields. Blank and `~` placeholders become `nil`; push names never
+establish external user identity. Phone enrichment remains connection-scoped
+through `Adapter.get_user/2`.
+
+Before emitting messages or reactions, the linked-device listener calls optional
+`Transport.canonical_user_id/2` for the sender. Amarula resolves a PN to its LID
+using only the originating connection's stored mapping. An existing LID is kept;
+missing mappings, unavailable lookups, or transports without this callback retain
+the original sender ID. No profile-phone inference or network discovery occurs.
+Room IDs and reaction target IDs are unchanged. Manual normalization without a
+listener does not resolve mappings. This does not migrate previously stored host
+identities or recover reactions that were already discarded.
 
 For manual ingress, use `Adapter.transform_incoming(payload, opts)` or
 `Adapter.parse_event(request, opts)` with `:profile`, `:conn`, or `:connection`
@@ -631,3 +640,36 @@ call permits up to forty seconds for the bounded persistence, seed and activatio
 stages to finish and return the durable receipt. If the whole session expires
 after an uncertain save, the host must reconcile the original attempt ID through
 its durable idempotency record before starting another onboarding attempt.
+
+
+## Private synchronous storage requests
+
+Hosts may provide `sink_mfa` instead of `document_mfa` when constructing saved
+connection options or shared authentication. `Adapter.prepare_connection/1`
+requests an opaque binding with `op: :bind`, derives the existing stable profile,
+and prepares split storage before listener registration. The configured sink
+receives a private `Storage.Request` struct and options, and returns the existing
+`:ok`, `:error`, `{:ok, value}`, or `{:error, reason}` result after host persistence
+commits. `:error` means an absent record; unavailable or unauthorized storage is
+an error tuple. Request inspection excludes bindings and record data.
+
+Hosts must route these requests before their serialized message State and must
+never accept them from public webhooks, chat action handlers, or lifecycle queues.
+Only trusted host initialization configures this sink. A request/binding is not
+itself authority to read a credential. Every access, including RAM authorization,
+must revalidate the binding and provider. Encryption and transactions remain host
+responsibilities. The package invokes no host persistence modules directly.
+
+Requests run in a bounded Task, with a seven-second deadline outside the host's
+shorter persistence deadline. Exceptions and invalid callback responses become
+`:storage_unavailable` without retaining sensitive details. An ambiguous timeout
+must not trigger an automatic retry or overwrite of state. Hosts should make
+writes idempotent and acknowledge only after commit. Task termination does not
+undo a transaction already committed remotely.
+
+Legacy `document_mfa` remains supported for existing hosts; `sink_mfa` takes
+precedence when both are supplied, without dual writes. Stored encoding and
+binding-derived profiles are unchanged. Pairing confirmation retains its existing
+persist/start authorization callbacks and uses the same storage sink for RAM
+handoff and subsequent saved runtime operations. `storage_runtime_spec/1` lets
+hosts supply deployment policy while the package owns runtime implementation.

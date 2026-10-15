@@ -26,17 +26,28 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
   @doc "Builds stable storage options; host document callbacks authorize the opaque binding on every access."
   @spec binding_options(term(), keyword()) :: keyword()
   def binding_options(binding, opts) when not is_nil(binding) do
-    {module, function, args} = Keyword.fetch!(opts, :document_mfa)
+    {module, function, args} =
+      case Keyword.fetch(opts, :sink_mfa) do
+        {:ok, sink} -> {Jido.Chat.WhatsApp.Storage.Request, :document, [sink]}
+        :error -> Keyword.fetch!(opts, :document_mfa)
+      end
+
     context = Keyword.fetch!(opts, :context)
-    digest = :crypto.hash(:sha256, :erlang.term_to_binary(binding, [:deterministic])) |> Base.encode16(case: :lower)
 
     [
-      profile: "jido_chat_whatsapp_" <> digest,
+      profile: profile(binding),
       scope: {:whatsapp, binding},
       context: binding,
       document_mfa: {module, function, args ++ [context]},
       volatile_namespaces: Keyword.get(opts, :volatile_namespaces, @volatile_namespaces)
     ]
+  end
+
+  @doc "Derives a stable profile from an opaque durable binding without performing storage I/O."
+  @spec profile(term()) :: String.t()
+  def profile(binding) do
+    digest = :crypto.hash(:sha256, :erlang.term_to_binary(binding, [:deterministic])) |> Base.encode16(case: :lower)
+    "jido_chat_whatsapp_" <> digest
   end
 
   @doc "Creates a callback context; it has no transient protocol state."

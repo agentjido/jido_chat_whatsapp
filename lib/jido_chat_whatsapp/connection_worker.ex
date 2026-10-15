@@ -507,7 +507,11 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     aliases = account_jids(state)
 
     Enum.each(messages, fn msg ->
-      payload = Message.to_payload(msg, Map.put(metadata, :profile, state.profile)) |> Map.put(:account_jids, aliases)
+      payload =
+        msg
+        |> Message.to_payload(Map.put(metadata, :profile, state.profile))
+        |> Map.put(:account_jids, aliases)
+        |> normalize_sender(state)
 
       case sink_payload(payload, state) do
         {:ok, event} ->
@@ -522,6 +526,19 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
       end
     end)
   end
+
+  defp normalize_sender(%{from_jid: jid} = payload, state) when is_binary(jid) do
+    if function_exported?(state.transport, :canonical_user_id, 2) do
+      case state.transport.canonical_user_id(state.conn, jid) do
+        {:ok, canonical} when is_binary(canonical) and canonical != "" -> %{payload | from_jid: canonical}
+        _ -> payload
+      end
+    else
+      payload
+    end
+  end
+
+  defp normalize_sender(payload, _state), do: payload
 
   defp sink_payload(%{type: type} = payload, state) when type in [:reaction, :media] do
     Adapter.parse_event(WebhookRequest.new(%{adapter_name: :whatsapp, payload: payload}),
