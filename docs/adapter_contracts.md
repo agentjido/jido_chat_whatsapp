@@ -683,3 +683,32 @@ Pairing confirmation and saved runtime storage use the same configured sink.
 `storage_runtime_spec/1` lets hosts supply deployment policy while the package
 owns runtime implementation. Pairing requests use their separate ten-second
 session deadline; storage requests retain the seven-second deadline above.
+
+## Explicit logout
+
+`Jido.Chat.WhatsApp.Adapter.logout(listener)` is an optional adapter extension,
+not a shared `Jido.Chat.Adapter` behaviour callback or capability. It delegates
+unchanged to `ConnectionWorker.logout/1`. The host supplies the exact running
+listener as a `GenServer.server()` reference after authorization and runtime
+selection. No configured logout MFA is required. `sink_mfa` continues to carry
+messages, lifecycle notifications and private storage requests.
+
+Results are `:ok`, `{:error, :logout_failed}` for transport logout failure,
+`{:error, :storage_unavailable}` during pending storage recovery, and
+`{:error, :unsupported}` if the transport has no logout callback. Standard
+`GenServer.call/2` exits, including missing listeners and timeouts, propagate;
+callers must treat an uncertain result as failure and reconcile before retrying.
+
+Success retains the transport's existing best-effort provider unlink and local
+credential/session clearing semantics for that profile, and emits `:logged_out`
+through the existing lifecycle sink. A sibling profile is unaffected. The worker
+remains alive with logged-out status; the host owns its supervision and removal.
+Ordinary listener stop/shutdown preserves saved credentials and is distinct from
+explicit logout. Provider acknowledgement while disconnected is not guaranteed.
+
+For the ZAQ follow-up, resolve the configured adapter and detect its optional
+`logout/1` export. Preserve actor authorization, exact listener selection,
+fail-closed explicit logout, Disable confirmation, disable-before-delete ordering
+and retry handling. Delete preparation remains a no-op for adapters without this
+extension. Remove the consumer's logout MFA configuration and fixtures when it
+adopts the library revision exposing this API.

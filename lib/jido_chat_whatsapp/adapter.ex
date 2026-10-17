@@ -68,6 +68,23 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   @spec authenticate(map(), term(), keyword()) :: Jido.Chat.Adapter.authentication_result()
   def authenticate(request, owner_id, opts), do: PairingSession.authenticate(request, owner_id, opts)
 
+  @doc """
+  Explicitly logs out the selected running listener and clears its saved session.
+
+  This optional WhatsApp adapter extension delegates to `ConnectionWorker.logout/1`.
+  Pass the exact listener's `GenServer.server()` reference, not a profile or binding.
+  Returns `:ok` after transport logout and cleanup, `{:error, :logout_failed}`
+  on transport failure, `{:error, :storage_unavailable}` while storage recovery is
+  pending, or `{:error, :unsupported}` when the transport lacks logout support.
+  Normal `GenServer.call/2` exits (including missing listener and timeout) propagate.
+
+  Successful logout emits the existing `:logged_out` lifecycle notification through
+  `:sink_mfa`. Ordinary listener shutdown preserves the saved session. The host
+  retains authorization, listener selection and supervision responsibilities.
+  """
+  @spec logout(GenServer.server()) :: :ok | {:error, term()}
+  def logout(listener), do: ConnectionWorker.logout(listener)
+
   @doc "Prepares saved transport configuration from an opaque binding and trusted sink."
   @spec connection_options(term(), keyword()) :: map()
   def connection_options(binding, opts) do

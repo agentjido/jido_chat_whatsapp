@@ -293,6 +293,76 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     assert Amarula.whereis(config.profile) == nil
   end
 
+  test "adapter logout isolates a running sibling and preserves shutdown storage", %{
+    config: config,
+    table: table
+  } do
+    alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
+
+    workers =
+      for suffix <- ["selected", "sibling"] do
+        profile = config.profile <> "_" <> suffix
+        creds = Amarula.Protocol.Auth.AuthUtils.init_auth_creds()
+        :ok = Store.put(table, profile, :creds, :self, creds)
+        :ok = Store.put(table, profile, :session, "key", suffix)
+
+        worker =
+          start_supervised!(
+            Supervisor.child_spec(
+              {ConnectionWorker,
+               bridge_id: suffix, config: %{config | profile: profile}, sink_mfa: {Sink, :emit, [self()]}},
+              id: suffix
+            )
+          )
+
+        send(:sys.get_state(worker).relay, {:amarula, :connection_update, %{connection: :open}})
+        assert_receive {:event, %{status: :connected, profile: ^profile}}
+        {worker, profile, creds}
+      end
+
+    [{selected, profile, _}, {sibling, sibling_profile, sibling_creds}] = workers
+    sibling_conn = Amarula.whereis(sibling_profile)
+    assert :ok = Adapter.logout(selected)
+    assert_receive {:event, %{status: :logged_out, profile: ^profile}}
+    assert ConnectionWorker.status(selected).status == :logged_out
+    assert :error = Store.get(table, profile, :creds, :self)
+    assert :error = Store.get(table, profile, :session, "key")
+    assert Amarula.whereis(profile) == nil
+    assert Process.alive?(sibling_conn)
+    assert Amarula.whereis(sibling_profile) == sibling_conn
+    assert ConnectionWorker.status(sibling).status == :connected
+    assert {:ok, ^sibling_creds} = Store.get(table, sibling_profile, :creds, :self)
+    assert {:ok, "sibling"} = Store.get(table, sibling_profile, :session, "key")
+
+    assert :ok = stop_supervised("sibling")
+    assert Amarula.whereis(sibling_profile) == nil
+    assert {:ok, ^sibling_creds} = Store.get(table, sibling_profile, :creds, :self)
+    assert {:ok, "sibling"} = Store.get(table, sibling_profile, :session, "key")
+  end
+
+  @tag capture_log: true
+  test "adapter logout surfaces cleanup failure and allows explicit recovery", %{config: config, table: table} do
+    alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
+
+    worker =
+      start_supervised!(
+        {ConnectionWorker, bridge_id: "adapter-logout", config: config, sink_mfa: {Sink, :emit, [self()]}}
+      )
+
+    :ok = Store.put(table, config.profile, :session, "key", "saved")
+    :ets.insert(table, {:fail_clear, true})
+    assert {:error, :logout_failed} = Adapter.logout(worker)
+    assert {:ok, "saved"} = Store.get(table, config.profile, :session, "key")
+    refute_receive {:event, %{status: :logged_out}}
+    refute ConnectionWorker.status(worker).status == :logged_out
+
+    :ets.delete(table, :fail_clear)
+    assert :ok = ConnectionWorker.reconnect(worker)
+    assert :ok = Adapter.logout(worker)
+    assert_receive {:event, %{status: :logged_out}}
+    assert :error = Store.get(table, config.profile, :session, "key")
+  end
+
   test "invalid profile and stopped handle fail safely" do
     assert {:error, :missing_profile} = AmarulaClient.connect(%{}, [])
 

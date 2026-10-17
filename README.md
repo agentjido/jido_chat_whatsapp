@@ -175,8 +175,10 @@ host responsibilities. See the [callback contract](docs/adapter_contracts.md).
 `ConnectionWorker.status/1` returns the current status. Use
 `ConnectionWorker.reconnect/1` to stop and start with the same configuration and a
 new attempt ID. Host supervisor shutdown stops the connection while retaining
-session storage. `ConnectionWorker.logout/1` explicitly unlinks and clears the
-profile; errors are returned. Duplicate live profile ownership is rejected.
+session storage. `Adapter.logout(listener)` explicitly unlinks and clears the
+selected listener's profile; errors are returned. This optional adapter extension
+requires no logout callback configuration. See the [logout contract](docs/adapter_contracts.md#explicit-logout).
+Duplicate live profile ownership is rejected.
 Protocol reconnect and process restart are handled by Amarula; the host owns
 bounded restart policy for the listener.
 Shared infrastructure failure rebuilds the package transport tree and terminates
