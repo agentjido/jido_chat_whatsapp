@@ -21,7 +21,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     WebhookResponse
   }
 
-  alias Jido.Chat.WhatsApp.{ConnectionWorker, Message, PairingSession, SendOptions}
+  alias Jido.Chat.WhatsApp.{ConnectionWorker, Message, MessageFormatter, PairingSession, SendOptions}
   alias Jido.Chat.WhatsApp.Storage.Split
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
@@ -181,6 +181,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   def send_message(jid, text, opts \\ []) do
     opts = SendOptions.new(opts)
     jid = to_jid(jid)
+    text = MessageFormatter.render(text, opts.format)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
          {:ok, msg_id} <- transport(opts).send_text(conn, jid, text, SendOptions.text_transport_opts(opts)) do
@@ -238,6 +239,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   def edit_message(jid, message_id, text, opts \\ []) do
     opts = SendOptions.new(opts)
     jid = to_jid(jid)
+    text = MessageFormatter.render(text, opts.format)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
          {:ok, msg_id} <- transport(opts).send_edit(conn, {jid, to_string(message_id), true}, text) do
@@ -453,7 +455,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       media_opts =
         opts
         |> SendOptions.media_transport_opts()
-        |> Keyword.put_new(:caption, upload_caption(upload, opts))
+        |> Keyword.put(:caption, MessageFormatter.render(upload_caption(upload, opts), opts.format))
         |> Keyword.put_new(:file_name, upload.filename)
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 

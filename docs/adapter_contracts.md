@@ -2,6 +2,67 @@
 
 ## Ownership and flows
 
+### Outbound Markdown (work-3ov)
+
+`Adapter.send_message/3`, `edit_message/4`, and `send_file/3` accept canonical
+`format` options through `SendOptions`, using keyword lists, maps (atom or string
+keys), or typed options. `:markdown` / `"markdown"` enables WhatsApp rendering.
+Absent format, `:plain_text` / `"plain_text"`, `:html` / `"html"`, and unknown
+values preserve the supplied text exactly. HTML rendering is unsupported; HTML
+is never inferred as Markdown. Atom keys take precedence over string aliases.
+
+The shared, pure `MessageFormatter` owns format normalization and text rendering;
+the adapter prepares text before calling `Transport.send_text/4`, `send_edit/3`,
+or `send_media/5`. Formatting is performed once and is not forwarded as a transport
+option. No process, configuration, host logic, network call, or model is involved.
+Routing, connection selection, quoted replies, mentions, receipts, and transport
+errors retain their existing contracts. This follows Telegram's separation of
+option policy, adapter payload preparation, and transport delivery without copying
+its platform-specific rich-message or parse-mode API.
+
+The renderer parses Markdown with EarmarkParser, now a direct runtime dependency
+at the already locked version. The shared `Jido.Chat.Markdown` parser was assessed
+but does not represent strikethrough. EarmarkParser handles emphasis, code, links,
+and GFM tables without adding a native library or a second Markdown dependency.
+
+| Markdown construct | WhatsApp output |
+| --- | --- |
+| Strong / emphasis / strike | `*bold*` / `_italic_` / `~strike~` |
+| Heading | Bold line |
+| Link / image | Label or alt text followed by `(URL)`; bare URLs are not repeated |
+| Code span / block | Literal contents with code delimiters; block language hints omitted |
+| Paragraphs, lists, quotes | Paragraph breaks, indented list markers, quoted lines |
+| Table | One bullet per body row, with header-labeled cells |
+
+Unknown parsed containers retain their children. Unmatched inline delimiters
+remain literal. Parser errors (including unclosed fences), or raw HTML anywhere
+in a Markdown document, preserve the entire original source. Code is never
+recursively parsed or converted. Inline code containing backticks uses triple
+backtick monospace delimiters. Unicode text and link destinations are retained.
+WhatsApp rendering of ambiguous literal formatting delimiters remains client
+controlled; this adapter does not introduce an escaping protocol.
+
+Captions use the existing precedence: explicit `opts.caption`, then atom-keyed
+upload metadata, then string-keyed upload metadata. The selected caption is
+rendered once, including explicit empty captions; missing captions remain omitted.
+The upload bytes, filename, and other media options are unaffected.
+
+Renderer and real-adapter tests cover the work-3ov send/status-edit acceptance
+example, all caption sources and precedence, formats and aliases, routing/options,
+receipts/errors, code, links, tables, lists, and Unicode. Property tests check
+pass-through text and literal fenced-code preservation. The two host regression
+scenarios from ZAQ's `whatsapp_markdown_delivery_test.exs` are ported upstream;
+updating ZAQ's dependency and running its integration suite is a separate step.
+Long-message splitting is deferred: inspected Amarula text/edit entry points
+accept prepared strings with no formatting-aware splitting. Splitting would need
+an explicit receipt and edit-target contract.
+
+Design references:
+
+- [OpenClaw channel Markdown rendering and table policy](https://docs.openclaw.ai/concepts/markdown-formatting)
+- [Hermes WhatsApp formatting and delivery](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/whatsapp#message-formatting--delivery)
+- [Twilio WhatsApp formatting reference](https://www.twilio.com/docs/whatsapp/message-features#formatting-in-whatsapp-messages)
+
 ### Media references
 
 Linked-device media ingress emits a normalized `EventEnvelope` containing an
