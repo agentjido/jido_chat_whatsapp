@@ -210,19 +210,19 @@ defmodule Jido.Chat.WhatsApp.AuthenticationTest do
 
   def host_request(
         _configured,
-        %Jido.Chat.WhatsApp.Pairing.Request{context: context, request: %{op: :persist} = request},
+        %Jido.Chat.Authentication.Request{context: context, request: %{op: :persist} = request},
         _opts
       ),
       do: persist(context, Map.delete(request, :op))
 
   def host_request(
         _configured,
-        %Jido.Chat.WhatsApp.Pairing.Request{context: context, request: %{op: :start, runtime: runtime}},
+        %Jido.Chat.Authentication.Request{context: context, request: %{op: :start, runtime: runtime}},
         _opts
       ),
       do: activate(context, runtime)
 
-  def host_request(context, %Jido.Chat.WhatsApp.Storage.Request{binding: binding, request: request}, _opts),
+  def host_request(context, %Jido.Chat.Storage.Request{binding: binding, request: request}, _opts),
     do: document(context, binding, request)
 
   # Host callbacks never call PairingSession or Split.

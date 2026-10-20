@@ -83,18 +83,66 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   retains authorization, listener selection and supervision responsibilities.
   """
   @spec logout(GenServer.server()) :: :ok | {:error, term()}
+  @impl true
   def logout(listener), do: ConnectionWorker.logout(listener)
 
   @doc "Prepares saved transport configuration from an opaque binding and trusted sink."
-  @spec connection_options(term(), keyword()) :: map()
+  @spec connection_options(term(), keyword()) :: map() | {:error, term()}
+  @impl true
+  def connection_options(nil, opts) do
+    if is_binary(opts[:profile]),
+      do: Map.new(opts),
+      else: {:error, :missing_linked_device_profile}
+  end
+
   def connection_options(binding, opts) do
     storage = Split.binding_options(binding, opts)
     %{profile: Keyword.fetch!(storage, :profile), storage: {Split, storage}}
   end
 
-  @doc "Requests the saved binding and prepares storage before a listener is registered."
+  @doc "Prepares listener options with package-owned connection storage and trusted history policy."
+  @impl true
   @spec prepare_connection(keyword()) :: {:ok, map()} | {:error, term()}
   def prepare_connection(opts) do
+    prepared =
+      case Keyword.get(opts, :connection_options) do
+        %{} = options -> {:ok, options}
+        nil -> prepare_saved_connection(opts)
+      end
+
+    with {:ok, options} <- prepared do
+      policy = Keyword.get(opts, :adapter_options, [])
+      ingress = %{}
+
+      ingress =
+        ingress
+        |> Map.merge(options)
+        |> Map.merge(%{
+          mode: :linked_device,
+          sync_history: Keyword.get(policy, :sync_history, false),
+          sync_full_history: Keyword.get(policy, :sync_full_history, false)
+        })
+
+      {:ok, ingress}
+    end
+  end
+
+  @doc "Returns stable opaque connector identity without requiring a running listener."
+  @impl true
+  @spec connection_identity(term()) :: {:ok, String.t()}
+  def connection_identity(binding), do: {:ok, Split.profile(binding)}
+
+  @doc "Returns package-owned shared storage specs with trusted deployment policy."
+  @impl true
+  @spec provider_child_specs(keyword()) :: {:ok, [Supervisor.child_spec()]}
+  def provider_child_specs(opts) do
+    spec = storage_runtime_spec(Keyword.take(Keyword.get(opts, :adapter_options, []), [:require_ram_schema]))
+    {:ok, [Supervisor.child_spec(spec, [])]}
+  end
+
+  # Requests the saved binding before a listener is registered.
+  @spec prepare_saved_connection(keyword()) :: {:ok, map()} | {:error, term()}
+  defp prepare_saved_connection(opts) do
     with {:ok, binding} when not is_nil(binding) <-
            Jido.Chat.WhatsApp.Storage.Request.call(opts[:sink_mfa], nil, %{op: :bind}),
          options <- connection_options(binding, opts),

@@ -8,7 +8,7 @@ defmodule Jido.Chat.WhatsApp.Storage.RequestTest do
     binding = %{secret: "binding-secret"}
     request = %{op: :put, namespace: "creds", key: "secret-key", value: "secret-value"}
     assert :ok = Request.call({__MODULE__, :reply, [self(), :ok]}, binding, request)
-    assert_receive %Request{binding: ^binding, request: ^request, version: 1, id: id} = event
+    assert_receive %Jido.Chat.Storage.Request{binding: ^binding, request: ^request, version: 1, id: id} = event
     assert is_reference(id)
     refute inspect(event) =~ "secret"
   end
@@ -16,7 +16,7 @@ defmodule Jido.Chat.WhatsApp.Storage.RequestTest do
   property "absence and sanitized host results retain their meaning" do
     check all(result <- member_of([:error, :ok, {:ok, "record"}, {:error, :credential_revoked}])) do
       assert Request.call({__MODULE__, :reply, [self(), result]}, :binding, %{op: :get}) == result
-      assert_receive %Request{}
+      assert_receive %Jido.Chat.Storage.Request{}
     end
   end
 

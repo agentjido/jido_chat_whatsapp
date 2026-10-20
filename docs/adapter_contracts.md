@@ -413,7 +413,7 @@ storage_opts = [
 storage = {Jido.Chat.WhatsApp.Storage.Split, storage_opts}
 ```
 
-The sink receives a private `Storage.Request` struct with `binding` and `request`
+The sink receives a private `Jido.Chat.Storage.Request` struct with `binding` and `request`
 fields, followed by callback options. Requests use `:get`, `:put`, `:delete`,
 `:clear`, `:list_keys` and `:delete_namespace`, with string namespaces and
 Base64-encoded uncompressed Erlang term keys/values. The host must authorize every
@@ -433,7 +433,7 @@ Begin options require `:supervisor`, stable binary `:attempt_id`, `:context`, an
 non-nil and match on subsequent calls. Owner process loss or expiry discards
 temporary state. The host must reauthorize every command.
 
-The sink receives a redacted `Pairing.Request` struct containing the configured
+The sink receives a redacted `Jido.Chat.Authentication.Request` struct containing the configured
 `context` and a `request` map, followed by callback options. For `execute/3`,
 persistence carries `%{op: :persist, attempt_id: id, identity: identity,
 records: durable_snapshot}`. The host saves atomically and idempotently by attempt
@@ -671,8 +671,8 @@ The shared path opts into translation, not another session runtime.
 
 Begin trusted options are `:supervisor`, `:owner` (monitored PID), `:attempt_id`,
 `:context`, and `:sink_mfa`. Transport/connect options and bounded `:ttl_ms`
-retain their existing meaning. The same sink receives private `Pairing.Request`
-and `Storage.Request` structs with distinct operation contracts.
+retain their existing meaning. The same sink receives private `Jido.Chat.Authentication.Request`
+and `Jido.Chat.Storage.Request` structs with distinct operation contracts.
 
 For shared authentication, the pairing persistence request contains
 `%{op: :persist, attempt_id: id, account: normalized_account,
@@ -721,7 +721,7 @@ its durable idempotency record before starting another onboarding attempt.
 Hosts provide `sink_mfa` for saved connection options and shared authentication.
 `Adapter.prepare_connection/1` requests an opaque binding with `op: :bind`, derives the existing stable profile,
 and prepares split storage before listener registration. The configured sink
-receives a private `Storage.Request` struct and options, and returns the existing
+receives a private `Jido.Chat.Storage.Request` struct and options, and returns the existing
 `:ok`, `:error`, `{:ok, value}`, or `{:error, reason}` result after host persistence
 commits. `:error` means an absent record; unavailable or unauthorized storage is
 an error tuple. Request inspection excludes bindings and record data.
@@ -773,3 +773,24 @@ fail-closed explicit logout, Disable confirmation, disable-before-delete orderin
 and retry handling. Delete preparation remains a no-op for adapters without this
 extension. Remove the consumer's logout MFA configuration and fixtures when it
 adopts the library revision exposing this API.
+
+## Shared optional adapter runtime contracts
+
+The optional Jido.Chat.Adapter connection/runtime contract is implemented by the
+WhatsApp adapter. Hosts use core wrappers and the existing `listener_child_specs/2`.
+`prepare_connection/1` returns a prepared ingress map; its core wrapper puts that
+map into listener opts. `provider_child_specs/1` returns shared infrastructure
+specs without starting them. Trusted `:adapter_options` select RAM schema and
+history policy; saved ingress is not authority for profiles or storage backends.
+`connection_identity/1` returns a tagged opaque stable identity; existing
+`connection_profile/1` is the package's profile derivation helper.
+`connection_options/2` retains its map result. The core wrapper merges it with
+host delivery opts, so every operation stays in the selected connector scope.
+A nil binding requires an explicit existing profile and never chooses a default.
+`logout/1` is an optional common adapter callback; ordinary shutdown preserves keys.
+
+Authentication envelopes are defined in Jido.Chat.Authentication.Request; storage
+envelopes are defined in Jido.Chat.Storage.Request. The package request modules
+own bounded runtime execution/delegation. Storage retains its seven-second bound;
+pairing retains its ten-second/remaining-session bound. Core request dispatch starts
+no processes. All use the one sink_mfa and retain version/id/redaction/result rules.

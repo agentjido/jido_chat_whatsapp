@@ -8,7 +8,7 @@ defmodule Jido.Chat.WhatsApp.Pairing.RequestTest do
     context = %{actor: "private-actor"}
     request = %{op: :persist, credentials: "private-credentials"}
     assert {:ok, :saved} = Request.call({__MODULE__, :reply, [self(), {:ok, :saved}]}, context, request)
-    assert_receive %Request{context: ^context, request: ^request, id: id} = event
+    assert_receive %Jido.Chat.Authentication.Request{context: ^context, request: ^request, id: id} = event
     assert is_reference(id)
     refute inspect(event) =~ "private"
   end
@@ -19,7 +19,7 @@ defmodule Jido.Chat.WhatsApp.Pairing.RequestTest do
             result <- member_of([:ok, {:ok, %{receipt: %{id: 1}}}, {:error, :unauthorized}])
           ) do
       assert Request.call({__MODULE__, :reply, [self(), result]}, :actor, %{op: op}) == result
-      assert_receive %Request{request: %{op: ^op}}
+      assert_receive %Jido.Chat.Authentication.Request{request: %{op: ^op}}
     end
   end
 

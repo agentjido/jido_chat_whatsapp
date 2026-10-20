@@ -98,20 +98,20 @@ defmodule Jido.Chat.WhatsApp.PairingSessionTest do
 
   def host_request(
         :malformed,
-        %Jido.Chat.WhatsApp.Pairing.Request{context: host, request: %{op: :persist} = request},
+        %Jido.Chat.Authentication.Request{context: host, request: %{op: :persist} = request},
         _opts
       ),
       do: malformed_handoff(host, Map.delete(request, :op))
 
   def host_request(:malformed, event, opts), do: host_request(event, opts)
 
-  def host_request(%Jido.Chat.WhatsApp.Pairing.Request{context: host, request: %{op: :persist} = request}, _opts),
+  def host_request(%Jido.Chat.Authentication.Request{context: host, request: %{op: :persist} = request}, _opts),
     do: persist(host, Map.delete(request, :op))
 
-  def host_request(%Jido.Chat.WhatsApp.Pairing.Request{context: host, request: %{op: :start, runtime: runtime}}, _opts),
+  def host_request(%Jido.Chat.Authentication.Request{context: host, request: %{op: :start, runtime: runtime}}, _opts),
     do: start_runtime(host, runtime)
 
-  def host_request(%Jido.Chat.WhatsApp.Storage.Request{binding: host, request: request}, _opts),
+  def host_request(%Jido.Chat.Storage.Request{binding: host, request: request}, _opts),
     do: document(host, request)
 
   def malformed_handoff(host, request) do
