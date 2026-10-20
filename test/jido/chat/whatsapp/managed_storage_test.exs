@@ -105,7 +105,7 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
   test "strict RAM policy rejects host disk schema while coexistence preserves host data" do
     directory = Path.join(System.tmp_dir!(), "whatsapp-schema-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
-    ebin = Mnesia |> :code.which() |> List.to_string() |> Path.dirname()
+    ebin = Application.app_dir(:jido_chat_whatsapp, "ebin")
 
     script = """
     Process.flag(:trap_exit, true)

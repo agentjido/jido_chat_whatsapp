@@ -337,6 +337,25 @@ defmodule Jido.Chat.WhatsApp.AdapterTest do
     assert envelope.payload.text == "hello"
   end
 
+  test "Thread.post keeps delivery in the chat and preserves explicit provider reply options" do
+    thread =
+      Chat.Thread.new(%{
+        id: "whatsapp:group@g.us:root",
+        adapter_name: :whatsapp,
+        adapter: Adapter,
+        external_room_id: "group@g.us",
+        external_thread_id: "root"
+      })
+
+    for quoted <- [nil, {"root", "alice@s.whatsapp.net"}] do
+      opts = [transport: MockTransport, conn: self(), quoted: quoted]
+      assert {:ok, _post} = Chat.Thread.post(thread, "Answer", opts)
+      assert_receive {:send_text, conn, "group@g.us", "Answer", transport_opts}
+      assert conn == self()
+      assert transport_opts[:quoted] == quoted
+    end
+  end
+
   test "parse_event/2 wraps reactions in ReactionEvent" do
     request =
       Jido.Chat.WebhookRequest.new(%{

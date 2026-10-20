@@ -60,6 +60,7 @@ defmodule Jido.Chat.WhatsApp.Message do
         from_me = truthy?(map_get(payload, [:from_me, "from_me"]))
         from_jid = from_jid || if(from_me, do: List.first(aliases) || "unknown")
         display_name = normalize_pushname(map_get(payload, [:pushname, "pushname"]))
+        thread_id = reply_thread_id(map_get(payload, [:quoted, "quoted"]), channel_jid)
 
         {:ok,
          %{
@@ -68,22 +69,20 @@ defmodule Jido.Chat.WhatsApp.Message do
            author: author(from_jid, from_me, display_name),
            mentions: mentions,
            was_mentioned: Enum.any?(mentions, & &1.is_self),
-           reply_context: reply_context(map_get(payload, [:quoted, "quoted"]), aliases),
            text: map_get(payload, [:text, "text"]) || text_for(type, map_get(payload, [:content, "content"])),
            media: media_for(type, map_get(payload, [:content, "content"])),
            username: from_jid,
            display_name: display_name,
            external_message_id: map_get(payload, [:id, "id"]),
-           external_reply_to_id: quoted_id(map_get(payload, [:quoted, "quoted"])),
            timestamp: normalize_timestamp(map_get(payload, [:timestamp, "timestamp"])),
            chat_type: chat_type,
            chat_title: nil,
-           external_thread_id: nil,
+           external_thread_id: thread_id,
            delivery_external_room_id: channel_jid,
            channel_meta: %{
              adapter_name: :whatsapp,
              external_room_id: channel_jid,
-             external_thread_id: nil,
+             external_thread_id: thread_id,
              delivery_external_room_id: channel_jid,
              chat_type: chat_type,
              chat_title: nil,
@@ -137,6 +136,11 @@ defmodule Jido.Chat.WhatsApp.Message do
   @spec thread_id(String.t() | nil) :: String.t() | nil
   def thread_id(nil), do: nil
   def thread_id(jid), do: "whatsapp:#{jid}"
+
+  @doc "Returns the chat-scoped routing key for an immediate reply target."
+  @spec thread_id(String.t(), String.t() | nil) :: String.t()
+  def thread_id(jid, nil), do: thread_id(jid)
+  def thread_id(jid, target), do: "whatsapp:#{jid}:#{target}"
 
   @doc "Converts an Amarula address, normalized address map, or JID string to a JID string."
   @spec address_to_jid(term()) :: String.t() | nil
@@ -206,8 +210,7 @@ defmodule Jido.Chat.WhatsApp.Message do
     %{
       id: map_get(quoted, [:id, "id"]),
       from_jid: quoted |> map_get([:from, "from"]) |> address_to_jid(),
-      channel_jid: quoted |> map_get([:channel, "channel"]) |> address_to_jid(),
-      text: quoted_text(quoted)
+      channel_jid: quoted |> map_get([:channel, "channel"]) |> address_to_jid()
     }
   end
 
@@ -264,9 +267,17 @@ defmodule Jido.Chat.WhatsApp.Message do
     |> String.downcase()
   end
 
-  defp quoted_id(nil), do: nil
-  defp quoted_id(quoted) when is_map(quoted), do: map_get(quoted, [:id, "id"])
-  defp quoted_id(_), do: nil
+  defp reply_thread_id(quoted, room) when is_map(quoted) do
+    id = map_get(quoted, [:id, "id"])
+    channel = map_get(quoted, [:channel_jid, "channel_jid", :channel, "channel"])
+
+    if is_binary(id) and byte_size(id) <= 255 and String.valid?(id) and
+         String.trim(id) != "" and (is_nil(channel) or address_to_jid(channel) == room) do
+      id
+    end
+  end
+
+  defp reply_thread_id(_, _), do: nil
 
   defp reaction_key(%{jid: jid, id: id}, _payload), do: {address_to_jid(jid), id}
   defp reaction_key(%{"jid" => jid, "id" => id}, _payload), do: {address_to_jid(jid), id}
@@ -333,25 +344,6 @@ defmodule Jido.Chat.WhatsApp.Message do
   end
 
   defp normalize_pushname(_), do: nil
-
-  defp reply_context(quoted, aliases) when is_map(quoted) do
-    jid = quoted |> map_get([:from_jid, "from_jid", :from, "from"]) |> address_to_jid()
-
-    %{
-      external_message_id: quoted_id(quoted),
-      text: quoted_text(quoted),
-      author: author(jid, identity_jid(jid) in aliases, nil)
-    }
-  end
-
-  defp reply_context(_, _), do: nil
-
-  defp quoted_text(quoted) do
-    inline = map_get(quoted, [:message, "message"]) || %{}
-
-    map_get(quoted, [:text, "text"]) ||
-      text_for(map_get(inline, [:type, "type"]), map_get(inline, [:content, "content"]))
-  end
 
   defp normalize_timestamp(nil), do: nil
   defp normalize_timestamp(value) when is_integer(value), do: value

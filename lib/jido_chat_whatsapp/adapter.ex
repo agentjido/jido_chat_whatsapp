@@ -358,7 +358,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
            EventEnvelope.new(%{
              adapter_name: :whatsapp,
              event_type: :message,
-             thread_id: Message.thread_id(to_string(incoming.external_room_id)),
+             thread_id: Message.thread_id(to_string(incoming.external_room_id), incoming.external_thread_id),
              channel_id: to_string(incoming.external_room_id),
              message_id: stringify(incoming.external_message_id),
              payload: incoming,

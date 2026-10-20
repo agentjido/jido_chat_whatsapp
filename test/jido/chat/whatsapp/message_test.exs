@@ -73,7 +73,8 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
              })
 
     assert attrs.external_room_id == "120363@g.us"
-    assert attrs.external_reply_to_id == "quoted-1"
+    assert attrs.external_thread_id == "quoted-1"
+    assert attrs.channel_meta.external_thread_id == "quoted-1"
     assert attrs.timestamp == 1_706_745_600
     assert attrs.chat_type == :group
     assert attrs.metadata.from_me == true

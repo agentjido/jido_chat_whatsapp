@@ -100,7 +100,7 @@ defmodule Jido.Chat.WhatsApp.MnesiaContractTest do
   test "an unavailable store fails closed and Mnesia restart loses state without writing files" do
     directory = Path.join(System.tmp_dir!(), "zaq-mnesia-#{Base.encode16(:crypto.strong_rand_bytes(16))}")
     on_exit(fn -> File.rm_rf!(directory) end)
-    ebin = SessionStorage |> :code.which() |> List.to_string() |> Path.dirname()
+    ebin = Application.app_dir(:jido_chat_whatsapp, "ebin")
 
     script = """
     alias Jido.Chat.WhatsApp.Storage.Mnesia, as: Store

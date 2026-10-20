@@ -2,7 +2,7 @@ defmodule Jido.Chat.WhatsApp.NormalizationContractTest do
   use ExUnit.Case, async: true
   alias Jido.Chat.WhatsApp.Adapter
 
-  test "canonical self, mentions and inline quotes use only supplied account aliases" do
+  test "self and mentions use supplied aliases while replies identify their thread" do
     payload = %{
       id: "m",
       channel_jid: "group@g.us",
@@ -21,9 +21,10 @@ defmodule Jido.Chat.WhatsApp.NormalizationContractTest do
     assert [own, other] = incoming.mentions
     assert own.is_self
     refute other.is_self
-    assert incoming.reply_context.external_message_id == "q"
-    assert incoming.reply_context.text == "previous"
-    assert incoming.reply_context.author.is_me
+    assert incoming.external_thread_id == "q"
+    assert incoming.channel_meta.external_thread_id == "q"
+    assert incoming.reply_context == nil
+    assert incoming.external_reply_to_id == nil
     assert incoming.chat_type == :group
     refute incoming.channel_meta.is_dm
 
