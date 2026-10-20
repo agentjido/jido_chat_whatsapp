@@ -100,7 +100,13 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     %{profile: Keyword.fetch!(storage, :profile), storage: {Split, storage}}
   end
 
-  @doc "Prepares listener options with package-owned connection storage and trusted history policy."
+  @doc """
+  Prepares saved or authenticated connections with trusted storage and configurable history.
+
+  Boolean history flags in `:ingress` override trusted connection options. Omitted
+  flags retain the trusted value, falling back to `false`. Other persisted ingress
+  values cannot override the authenticated profile or storage configuration.
+  """
   @impl true
   @spec prepare_connection(keyword()) :: {:ok, map()} | {:error, term()}
   def prepare_connection(opts) do
@@ -110,33 +116,34 @@ defmodule Jido.Chat.WhatsApp.Adapter do
         nil -> prepare_saved_connection(opts)
       end
 
-    with {:ok, options} <- prepared do
-      policy = Keyword.get(opts, :adapter_options, [])
-      ingress = %{}
-
-      ingress =
-        ingress
-        |> Map.merge(options)
-        |> Map.merge(%{
-          mode: :linked_device,
-          sync_history: Keyword.get(policy, :sync_history, false),
-          sync_full_history: Keyword.get(policy, :sync_full_history, false)
-        })
-
-      {:ok, ingress}
+    with {:ok, options} <- prepared,
+         {:ok, history} <- prepared_history_options(Keyword.get(opts, :ingress, %{}), options) do
+      {:ok, options |> Map.merge(history) |> Map.put(:mode, :linked_device)}
     end
   end
+
+  defp prepared_history_options(ingress, options) when is_map(ingress) do
+    Enum.reduce_while([:sync_history, :sync_full_history], {:ok, %{}}, fn key, {:ok, acc} ->
+      value = Map.get(ingress, key, Map.get(ingress, Atom.to_string(key), Map.get(options, key, false)))
+
+      if is_boolean(value),
+        do: {:cont, {:ok, Map.put(acc, key, value)}},
+        else: {:halt, {:error, :invalid_history_options}}
+    end)
+  end
+
+  defp prepared_history_options(_, _), do: {:error, :invalid_history_options}
 
   @doc "Returns stable opaque connector identity without requiring a running listener."
   @impl true
   @spec connection_identity(term()) :: {:ok, String.t()}
   def connection_identity(binding), do: {:ok, Split.profile(binding)}
 
-  @doc "Returns package-owned shared storage specs with trusted deployment policy."
+  @doc "Returns shared storage specs requiring a RAM-only Mnesia schema for every host."
   @impl true
   @spec provider_child_specs(keyword()) :: {:ok, [Supervisor.child_spec()]}
-  def provider_child_specs(opts) do
-    spec = storage_runtime_spec(Keyword.take(Keyword.get(opts, :adapter_options, []), [:require_ram_schema]))
+  def provider_child_specs(_opts) do
+    spec = storage_runtime_spec(require_ram_schema: true)
     {:ok, [Supervisor.child_spec(spec, [])]}
   end
 
@@ -148,7 +155,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
          options <- connection_options(binding, opts),
          {module, storage_opts} <- options.storage,
          :ok <- module.prepare(module.new(storage_opts)) do
-      {:ok, Map.merge(options, %{mode: :linked_device, sync_history: false, sync_full_history: false})}
+      {:ok, options}
     else
       {:ok, _} -> {:error, :invalid_binding}
       error -> error

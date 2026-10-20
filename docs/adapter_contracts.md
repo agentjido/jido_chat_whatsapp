@@ -275,7 +275,9 @@ never fall back to files, and prevent persistence failure from becoming pairing
 success. Missing state and unreadable/corrupt state must be distinguishable.
 `storage_root` is the file-store convenience, and must not override custom storage.
 
-Both `sync_history` and `sync_full_history` default to Amarula's true. The former
+For direct listener construction, both `sync_history` and `sync_full_history`
+default to Amarula's true. Prepared connections use the explicit flags or fallback
+described in the shared runtime contract below. The former
 gates historical import delivery, the latter requests full versus recent history.
 Neither gates ordinary `messages_upsert`, including queued messages. No timestamp
 heuristics. Enabled history is delivered with explicit history metadata.
@@ -780,8 +782,18 @@ The optional Jido.Chat.Adapter connection/runtime contract is implemented by the
 WhatsApp adapter. Hosts use core wrappers and the existing `listener_child_specs/2`.
 `prepare_connection/1` returns a prepared ingress map; its core wrapper puts that
 map into listener opts. `provider_child_specs/1` returns shared infrastructure
-specs without starting them. Trusted `:adapter_options` select RAM schema and
-history policy; saved ingress is not authority for profiles or storage backends.
+specs without starting them. Shared storage requires a RAM-only Mnesia schema.
+Prepared saved/authenticated connections accept boolean `sync_history` and
+`sync_full_history` flags from `opts[:ingress]`, with atom or string keys. Explicit
+ingress values override trusted connection options; omitted flags use trusted
+values, falling back to `false`. Explicit null or nonboolean values return
+`{:error, :invalid_history_options}`. Hosts can persist and pass their own initial
+choices through the existing listener options; no provider registry options or
+additional MFA are required. Persisted ingress cannot select profiles/storage
+backends or inject arbitrary nested transport configuration.
+The lower-level `Storage.Runtime` and
+`Storage.Mnesia` APIs remain explicitly configurable, including disk-schema
+acceptance; direct listener construction retains its explicit history options.
 `connection_identity/1` returns a tagged opaque stable identity; existing
 `connection_profile/1` is the package's profile derivation helper.
 `connection_options/2` retains its map result. The core wrapper merges it with
