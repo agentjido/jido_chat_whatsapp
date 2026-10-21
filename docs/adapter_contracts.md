@@ -366,6 +366,41 @@ orchestration. See [managed storage and pairing](#managed-storage-and-pairing).
 
 ## Managed storage and pairing
 
+### Offline storage cleanup
+
+`Adapter.cleanup_connection(binding, opts)` is a package-specific optional
+extension for hosts whose saved account has no listener. With a non-nil binding,
+it derives the profile/storage through `connection_options/2` and requires a
+trusted `sink_mfa`; it never sends `:bind` or provisions credentials. A standalone
+file/custom store uses `nil` binding with an explicit trusted `profile` and its
+normal storage options. Host storage callbacks must authorize the existing binding
+on every operation. This does not add a shared `Jido.Chat.Adapter` callback.
+
+The configured `:transport` defaults to `AmarulaClient`. Missing transport cleanup
+returns `:unsupported`; invalid backend responses and exceptions are sanitized.
+Execution defaults to 10,000 ms, bounded by `cleanup_timeout_ms` in 1..10,000.
+A timeout returns `:cleanup_timeout` and means uncertain completion; callers must
+not automatically retry or claim that already-written changes were rolled back.
+Running listeners continue to use `Adapter.logout/1`.
+
+The optional `Transport.cleanup(config, opts)` operation clears the selected
+profile without a live connection. `AmarulaClient.cleanup/2` resolves storage with
+the same rules as startup: explicit custom storage or a prebuilt scope takes
+precedence over `storage_root`; otherwise Amarula's configured defaults apply.
+Cleanup uses the backend's existing `clear` callback without reading credentials,
+starting a connection, or initializing unrelated caches. File storage does not
+require the managed Mnesia runtime. Custom backend failure never falls back to files.
+
+The host must authorize the trusted configuration and exclude concurrent startup
+and protocol writes until its disable/archive operation completes. The adapter
+does not own the host's runtime supervisor or database transaction. Ordinary stop
+preserves credentials; offline cleanup removes only the selected profile's local
+records and cannot guarantee a server unlink acknowledgment. Repeated clearing is
+safe. Unsupported cleanup and partial failures return errors; already-cleared
+durable records cannot be restored when a later RAM clear fails.
+
+### Managed runtime startup
+
 Start managed storage explicitly once per BEAM node, before preparing storage,
 confirming pairing or starting managed listeners:
 

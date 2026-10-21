@@ -178,6 +178,22 @@ new attempt ID. Host supervisor shutdown stops the connection while retaining
 session storage. `Adapter.logout(listener)` explicitly unlinks and clears the
 selected listener's profile; errors are returned. This optional adapter extension
 requires no logout callback configuration. See the [logout contract](docs/adapter_contracts.md#explicit-logout).
+
+When a saved account has no listener, authorized hosts can explicitly clean up its
+existing storage with the package extension `Adapter.cleanup_connection/2`:
+
+```elixir
+# Existing host binding; callbacks authorize this exact account.
+Adapter.cleanup_connection(binding, sink_mfa: {MyApp.Ingress, :emit, []})
+
+# Standalone Amarula file storage; no connection or managed Mnesia is started.
+Adapter.cleanup_connection(nil, profile: "agent_primary", storage_root: "/var/lib/my_app/amarula")
+```
+
+Hosts must exclude startup and writes until disable/archive completes. Cleanup
+retains the binding association and clears only the selected profile; partial
+failures and timeouts remain errors. See [offline cleanup](docs/adapter_contracts.md#offline-storage-cleanup)
+for storage precedence, authorization and retry semantics.
 Duplicate live profile ownership is rejected.
 Protocol reconnect and process restart are handled by Amarula; the host owns
 bounded restart policy for the listener.

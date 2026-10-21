@@ -86,6 +86,76 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   @impl true
   def logout(listener), do: ConnectionWorker.logout(listener)
 
+  @doc """
+  Clears an existing account's configured storage without requiring a listener.
+
+  This package extension is independent of the shared Jido.Chat behaviour. A
+  saved binding requires a trusted `sink_mfa`; standalone storage requires an
+  explicit `profile` and uses existing connection options. No binding is created.
+  Hosts authorize the request and exclude concurrent startup/writes until their
+  disable/archive command completes. The selected transport must support cleanup.
+
+  `cleanup_timeout_ms` bounds execution to 1..10,000 ms (default 10,000). A timeout
+  is uncertain completion and must not trigger automatic retries. Errors are
+  sanitized; partial cleanup cannot be rolled back. Ordinary shutdown is unchanged.
+  """
+  @spec cleanup_connection(term(), keyword()) :: :ok | {:error, atom()}
+  def cleanup_connection(binding, opts) when is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         timeout when is_integer(timeout) and timeout in 1..10_000 <- Keyword.get(opts, :cleanup_timeout_ms, 10_000),
+         {:ok, transport} <- cleanup_transport(opts),
+         {:ok, config} <- cleanup_config(binding, opts) do
+      task = Task.async(fn -> invoke_cleanup(transport, config, opts) end)
+
+      case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+        {:ok, result} -> result
+        _ -> {:error, :cleanup_timeout}
+      end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_cleanup_request}
+    end
+  end
+
+  def cleanup_connection(_, _), do: {:error, :invalid_cleanup_request}
+
+  defp cleanup_transport(opts) do
+    transport = Keyword.get(opts, :transport, AmarulaClient)
+
+    with true <- is_atom(transport) and not is_nil(transport),
+         {:module, _} <- Code.ensure_loaded(transport),
+         true <- function_exported?(transport, :cleanup, 2) do
+      {:ok, transport}
+    else
+      _ -> {:error, :unsupported}
+    end
+  end
+
+  defp cleanup_config(nil, opts) do
+    case connection_options(nil, opts) do
+      %{} = config -> {:ok, config}
+      error -> error
+    end
+  end
+
+  defp cleanup_config(binding, opts) do
+    with {:ok, _} <- validate_sink_mfa(opts[:sink_mfa]) do
+      {:ok, connection_options(binding, opts)}
+    end
+  end
+
+  defp invoke_cleanup(transport, config, opts) do
+    case transport.cleanup(config, opts) do
+      :ok -> :ok
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _ -> {:error, :cleanup_failed}
+    end
+  rescue
+    _ -> {:error, :cleanup_failed}
+  catch
+    _, _ -> {:error, :cleanup_failed}
+  end
+
   @doc "Prepares saved transport configuration from an opaque binding and trusted sink."
   @spec connection_options(term(), keyword()) :: map() | {:error, term()}
   @impl true

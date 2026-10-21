@@ -6,6 +6,9 @@ defmodule Jido.Chat.WhatsApp.Transport do
   supplied `:parent`. Its handle must survive protocol process restarts without
   allowing stale cleanup to stop a different connection instance. `stop/2`
   preserves storage; optional `logout/2` explicitly clears it and returns errors.
+  Optional `cleanup/2` clears configured storage without a live connection.
+  Hosts must exclude concurrent startup and writes until their lifecycle command
+  completes; offline cleanup cannot guarantee a remote unlink acknowledgment.
   Optional `account_jids/1` returns only the connected account's phone/LID aliases.
   Optional `account_identity/1` returns only authenticated `phone_number`,
   `display_name` and `account_jids`, normalized by `AccountIdentity`. Phone must
@@ -35,6 +38,8 @@ defmodule Jido.Chat.WhatsApp.Transport do
   @callback recovery_status(conn()) :: :reconnecting | :failed
   @callback health(conn()) :: :ok | {:error, term()}
   @callback logout(conn(), keyword()) :: :ok | {:error, term()}
+  @doc "Clears one trusted profile's configured storage without connecting or reading credentials."
+  @callback cleanup(config :: map(), opts :: keyword()) :: :ok | {:error, atom()}
   @callback account_identity(conn()) ::
               {:ok, Jido.Chat.WhatsApp.AccountIdentity.t()} | {:error, :unavailable | :timeout}
   @callback account_jids(conn()) :: {:ok, [String.t()]} | {:error, term()}
@@ -97,6 +102,7 @@ defmodule Jido.Chat.WhatsApp.Transport do
                       account_identity: 1,
                       health: 1,
                       logout: 2,
+                      cleanup: 2,
                       account_jids: 1,
                       ensure_started: 1,
                       stop: 2,

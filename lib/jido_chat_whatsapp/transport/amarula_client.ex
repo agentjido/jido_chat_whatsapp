@@ -196,6 +196,44 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
     :exit, _ -> {:error, :logout_failed}
   end
 
+  @doc """
+  Clears the selected profile through its configured storage, without connecting.
+
+  Uses the same storage selection as startup, including upstream defaults and
+  prebuilt scopes. No credential reads or unrelated cache initialization occur.
+  Hosts must exclude concurrent connections/writes until disablement completes.
+  A partial storage failure is reported; cleared records cannot be rolled back.
+  """
+  @impl true
+  @spec cleanup(map(), keyword()) :: :ok | {:error, atom()}
+  def cleanup(config, opts) when is_map(config) and is_list(opts) do
+    with :ok <- validate_profile(config) do
+      # Amarula.new resolves upstream storage defaults. Prebuilt inert scopes
+      # avoid initializing configured caches unrelated to this storage operation.
+      conn =
+        config
+        |> storage_config(opts)
+        |> Map.put(:retry_cache, %Amarula.RetryCache.Scope{adapter: Amarula.RetryCache.ETS, state: nil})
+        |> Map.put(:message_secret_store, %Amarula.MessageSecretStore.Scope{
+          adapter: Amarula.MessageSecretStore.ETS,
+          state: nil
+        })
+        |> Amarula.new()
+
+      case Amarula.Storage.clear(conn.storage, conn.profile) do
+        :ok -> :ok
+        {:error, reason} when is_atom(reason) -> {:error, reason}
+        _ -> {:error, :cleanup_failed}
+      end
+    end
+  rescue
+    _ -> {:error, :cleanup_failed}
+  catch
+    _, _ -> {:error, :cleanup_failed}
+  end
+
+  def cleanup(_, _), do: {:error, :invalid_cleanup_request}
+
   @impl true
   def recovery_status(conn) do
     # Amarula schedules retries while disconnected and moves to :closed when
@@ -245,22 +283,23 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   end
 
   defp build_connection(config, opts) do
-    config =
-      case Map.get(config, :storage) do
-        nil ->
-          case Map.get(config, :storage_root) do
-            nil -> config
-            root -> Map.put(config, :storage, {Amarula.Storage.File, root: root})
-          end
-
-        storage ->
-          Map.put(config, :storage, {GuardedStorage, storage: storage, notify: opts[:parent] || opts[:parent_pid]})
-      end
-
-    conn = Amarula.new(config)
+    conn = config |> storage_config(opts) |> Amarula.new()
     # Fail before spawning the protocol tree on unreadable custom credentials.
     _ = Amarula.Storage.get(conn.storage, conn.profile, :creds, :self)
     {:ok, conn}
+  end
+
+  defp storage_config(config, opts) do
+    case Map.get(config, :storage) do
+      nil ->
+        case Map.get(config, :storage_root) do
+          nil -> config
+          root -> Map.put(config, :storage, {Amarula.Storage.File, root: root})
+        end
+
+      storage ->
+        Map.put(config, :storage, {GuardedStorage, storage: storage, notify: opts[:parent] || opts[:parent_pid]})
+    end
   end
 
   # Registry removes dead owners asynchronously after supervisor shutdown. Never
