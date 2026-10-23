@@ -70,18 +70,60 @@ This is the expected mode for `jido_messaging` bridges.
       mode: "linked_device",
       profile: "agent_primary"
     },
-    sink_mfa: {Jido.Messaging.IngressSink, :emit, [MyApp.Messaging, "bridge_wa"]}
+    sink_mfa: {MyApp.Ingress, :emit, ["bridge_wa"]}
   )
 
-children = [Amarula.Supervisor | specs]
+children = specs
 ```
 
-Start the shared `Amarula.Supervisor` before the generated connection workers.
-Only one shared Amarula supervisor is needed in the host application's supervision tree.
+The `:jido_chat_whatsapp` OTP application starts the shared transport infrastructure
+automatically. Hosts add only the generated listener specs to their supervision
+tree. Application startup opens no profiles or network connections, including on
+nodes without WhatsApp listeners.
 
-On first pairing Amarula emits QR and pairing lifecycle updates. The worker
-forwards those as non-message action events. Chat messages from
-`:messages_upsert` are normalized into `Jido.Chat.Incoming`.
+When migrating a host that already supervises Amarula, remove that child before
+using the default package-owned runtime. For a staged transition, set
+`config :jido_chat_whatsapp, start_runtime: false` before application startup and
+retain the host's existing infrastructure supervision/recovery. Remove that setting
+when the host wiring is removed. The package never adopts an existing supervisor
+or starts a second owner. This option is a boot-time setting.
+
+The single `sink_mfa` receives chat payloads and typed event envelopes, followed
+by callback options. Normalize plain chat payloads with `Adapter.transform_incoming/1`;
+route envelopes with `Jido.Chat.route_event/4`. Lifecycle uses `:action` envelopes,
+action ID `"connection_update"`, and `metadata.category: :connection_lifecycle`.
+Metadata includes profile, attempt, originating worker source, event, status, QR
+and sanitized identity fields. Treat the sink as a confidential QR display boundary;
+lifecycle must never become a message or invoke an agent. Existing hosts need the
+[consumer migration](docs/adapter_contracts.md#zaq-migration-handoff-work-fqt)
+before adopting this change; ZAQ is not yet compatible.
+Only socket open reports `:connected`; pairing success reports `:authenticating`.
+QR expiry reports `status: :expired` and `qr: nil`, retained in subsequent
+`ConnectionWorker.status/1` snapshots. This differs from transport
+`:disconnected`. A replacement QR restores `:pairing`; connection, reconnect and
+logout replace expiry with their respective lifecycle statuses.
+
+Authenticated account identity is fetched asynchronously on socket open. A
+`:identity_updated` lifecycle event and `ConnectionWorker.status/1` expose only
+`%{phone_number: "+15551234567", display_name: nil, account_jids: [...]}`.
+Phone comes only from a PN alias; LID-only accounts have no inferred phone.
+Unknown names remain nil. `:connected` is independent of `identity_status`
+(`:pending`, `:available`, `:unavailable`). To fetch a late name or retry an
+unavailable identity, call `ConnectionWorker.refresh_identity(worker)`; this
+returns immediately and never enables history. A name is not guaranteed with
+history disabled. Lifecycle callbacks run in order outside the worker and may
+query status. The host owns confirmation, temporary profiles and channel creation.
+See the [identity contract](docs/adapter_contracts.md#authenticated-account-identity-work-jut)
+for deadlines, fixed errors, examples and clearing semantics.
+
+The canonical incoming message includes `author.is_me`, `mentions`,
+`was_mentioned`, `reply_context`, and accurate DM/group facts. Phone/LID aliases
+come from the receiving connection through `Transport.account_jids/1`; no
+recipient or timestamp heuristics are used. Broadcast/newsletter rooms are
+unsupported. Group invocation policy remains with the host.
+
+See [adapter contracts](docs/adapter_contracts.md) for lifecycle, storage,
+compatibility, history delivery and host supervision requirements.
 
 Linked-device events are local Amarula process messages. They are not HTTP
 webhooks. `verify_webhook/2` is a compatibility no-op and is not an
@@ -109,12 +151,78 @@ Bridge listener settings can include:
   ingress: %{
     mode: "linked_device",
     profile: "agent_primary",
-    storage_root: "/var/lib/my_app/amarula"
+    storage_root: "/var/lib/my_app/amarula",
+    sync_history: false,
+    sync_full_history: false
   }
 }
 ```
 
+## Host-provided storage and lifecycle
+
+For package-managed RAM messaging state and QR-first onboarding, explicitly start
+`{Jido.Chat.WhatsApp.Storage.Runtime, require_ram_schema: true}` before consumers.
+`Storage.Split` combines authorized host persistence with the package Mnesia
+backend. `PairingSession` owns temporary storage, identity confirmation and
+handoff through host callbacks. See the [managed storage and pairing contract](docs/adapter_contracts.md#managed-storage-and-pairing).
+
+For custom persistence, pass `storage: {MyApp.WhatsAppStorage, options}` in
+`ingress`. The backend implements Amarula's profile-scoped storage callbacks;
+custom storage takes precedence over `storage_root`. No fallback to file storage
+occurs on callback failure. Encryption, atomic writes and durable storage are
+host responsibilities. See the [callback contract](docs/adapter_contracts.md).
+
+`ConnectionWorker.status/1` returns the current status. Use
+`ConnectionWorker.reconnect/1` to stop and start with the same configuration and a
+new attempt ID. Host supervisor shutdown stops the connection while retaining
+session storage. `Adapter.logout(listener)` explicitly unlinks and clears the
+selected listener's profile; errors are returned. This optional adapter extension
+requires no logout callback configuration. See the [logout contract](docs/adapter_contracts.md#explicit-logout).
+
+When a saved account has no listener, authorized hosts can explicitly clean up its
+existing storage with the package extension `Adapter.cleanup_connection/2`:
+
+```elixir
+# Existing host binding; callbacks authorize this exact account.
+Adapter.cleanup_connection(binding, sink_mfa: {MyApp.Ingress, :emit, []})
+
+# Standalone Amarula file storage; no connection or managed Mnesia is started.
+Adapter.cleanup_connection(nil, profile: "agent_primary", storage_root: "/var/lib/my_app/amarula")
+```
+
+Hosts must exclude startup and writes until disable/archive completes. Cleanup
+retains the binding association and clears only the selected profile; partial
+failures and timeouts remain errors. See [offline cleanup](docs/adapter_contracts.md#offline-storage-cleanup)
+for storage precedence, authorization and retry semantics.
+Duplicate live profile ownership is rejected.
+Protocol reconnect and process restart are handled by Amarula; the host owns
+bounded restart policy for the listener.
+Shared infrastructure failure rebuilds the package transport tree and terminates
+affected listeners so that policy can restart them with fresh attempt identities.
+Startup waits at most five seconds for transport readiness. Stopping a listener
+does not stop the shared runtime or other profiles. Stopping the package application
+stops all its transport connections; stop host listeners first during planned shutdown.
+
+Both history options default to `true`. `sync_history: false` suppresses history
+imports, while `sync_full_history: false` requests a recent window when history
+is enabled. Ordinary queued messages still arrive. Enabled imported messages
+have `incoming.metadata.history == true`; the host must deduplicate by message
+ID if history and live delivery overlap.
+
 ## Pairing
+
+For host-driven onboarding, discover `:authenticate` using
+`Jido.Chat.Adapter.capabilities(Jido.Chat.WhatsApp.Adapter)` and call
+`Jido.Chat.Adapter.authenticate/4`. Begin returns pending; poll the opaque session
+for a QR challenge and authenticated account, then explicitly confirm its
+`external_id`. Retry preserves the live session and linked credentials.
+
+Trusted host callbacks receive package-encoded credentials and return an opaque
+binding. The package prepares storage options, seeds volatile state, and invokes
+the host's existing activation callback. `runtime_pending: true` still means the
+connector is saved. Both authentication entry points use the same `sink_mfa` for private pairing and storage requests.
+See [shared authentication and host handoff](docs/adapter_contracts.md#shared-authentication-capability-work-9ya)
+for callback shapes and migration details.
 
 This adapter ships a QR-only pairing task that creates the Amarula profile:
 

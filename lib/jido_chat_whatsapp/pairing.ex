@@ -5,6 +5,95 @@ defmodule Jido.Chat.WhatsApp.Pairing do
 
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
+  @doc "Normalizes an authenticated account without protocol identifiers or provider data."
+  @spec account(map()) :: map()
+  def account(%{phone_number: phone} = identity),
+    do: %{external_id: phone, display_name: safe_name(identity[:display_name])}
+
+  @doc "Projects legacy pairing progress into the shared authentication contract."
+  @spec authentication_presentation(map(), term()) :: map()
+  def authentication_presentation(status, session) do
+    base = Map.take(status, [:summary]) |> Map.put(:session, session)
+
+    case status do
+      %{phase: :confirm, identity: identity} ->
+        Map.merge(base, %{phase: :authenticated, account: account(identity)})
+
+      %{phase: :pairing, qr: qr} when is_binary(qr) ->
+        Map.merge(base, %{phase: :challenge, challenge: %{type: :qr, value: qr, expires_at: nil}})
+
+      %{phase: :saved, saved: saved} ->
+        Map.merge(base, %{phase: :saved, receipt: public_receipt(saved), runtime_pending: saved.runtime_pending})
+
+      %{phase: phase} when phase in [:failed, :expired, :disconnected] ->
+        Map.put(base, :phase, :failed)
+
+      _ ->
+        Map.put(base, :phase, :pending)
+    end
+  end
+
+  @doc "Allows only public scalar receipt fields from a trusted persistence result."
+  @spec public_receipt(map()) :: map()
+  def public_receipt(receipt) do
+    receipt
+    |> Map.take([:id, :name])
+    |> Map.filter(fn
+      {:id, value} -> is_binary(value) or is_integer(value)
+      {:name, value} -> is_binary(value)
+    end)
+  end
+
+  defp safe_name(name) when is_binary(name), do: name
+  defp safe_name(_), do: nil
+
+  @doc "Classifies lifecycle progress without retaining provider error or credential data."
+  @spec lifecycle_status(atom(), term()) :: atom() | nil
+  def lifecycle_status(:connection_update, %{connection: :open}), do: :connected
+  def lifecycle_status(:connection_update, %{connection: :closed}), do: :disconnected
+  def lifecycle_status(:connection_update, %{connection: :connecting}), do: :connecting
+  def lifecycle_status(:pairing_success, _), do: :authenticating
+  def lifecycle_status(event, _) when event in [:pairing_failure, :error], do: :failed
+  def lifecycle_status(_, _), do: nil
+
+  @doc "Projects a connection snapshot into a safe presentation shared by pairing and lifecycle events."
+  @spec presentation(map()) :: map()
+  def presentation(%{status: status, attempt_id: attempt, qr: qr}) do
+    {phase, level, summary} =
+      case status do
+        :connected ->
+          {:connected, :ok, "Linked device connected"}
+
+        :reconnecting ->
+          {:pending, :pending, "Reconnecting with the linked account"}
+
+        :pairing ->
+          {:pairing, :pending, "Scan the QR code to connect"}
+
+        :expired ->
+          {:expired, :error, "Pairing code expired; retry connection"}
+
+        :failed ->
+          {:failed, :error, "Device connection failed; retry connection"}
+
+        value when value in [:disconnected, :logged_out] ->
+          {:disconnected, :error, "Linked device disconnected"}
+
+        _ ->
+          {:pending, :pending, "Waiting for device connection"}
+      end
+
+    %{
+      attempt_id: inspect(attempt),
+      phase: phase,
+      status: level,
+      summary: summary,
+      expires_at: nil,
+      qr: if(phase == :pairing and is_binary(qr), do: qr),
+      mode: "linked_device"
+    }
+  end
+
   @doc "Runs the interactive pairing flow for one Amarula profile."
   @spec run(String.t(), keyword()) :: :ok | :timeout | {:error, :connection_failed}
   def run(profile, opts) when is_binary(profile) and is_list(opts) do
@@ -56,6 +145,9 @@ defmodule Jido.Chat.WhatsApp.Pairing do
           Process.sleep(Keyword.get(transport_opts, :success_delay_ms, 1_000))
           :ok
 
+        {:error, :connection_failed} = error ->
+          error
+
         :timeout ->
           :timeout
       end
@@ -84,7 +176,9 @@ defmodule Jido.Chat.WhatsApp.Pairing do
           loop(transport, conn, transport_opts, deadline)
 
         {:amarula, :connection_update, %{connection: :open}} ->
-          :ok
+          if function_exported?(transport, :health, 1) and transport.health(conn) != :ok,
+            do: {:error, :connection_failed},
+            else: :ok
 
         {:amarula, :error, _error} ->
           Logger.error("WhatsApp connection error. Error data was redacted.")

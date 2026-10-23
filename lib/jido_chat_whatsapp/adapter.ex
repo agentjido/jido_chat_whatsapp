@@ -1,6 +1,9 @@
 defmodule Jido.Chat.WhatsApp.Adapter do
   @moduledoc """
   WhatsApp `Jido.Chat.Adapter` implementation using Amarula.
+
+  Optional shared authentication delegates to the existing provisional pairing
+  session. Host bindings are converted to transport options inside this package.
   """
 
   use Jido.Chat.Adapter
@@ -13,11 +16,13 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     Incoming,
     Media,
     Response,
+    UserInfo,
     WebhookRequest,
     WebhookResponse
   }
 
-  alias Jido.Chat.WhatsApp.{ConnectionWorker, Message, SendOptions}
+  alias Jido.Chat.WhatsApp.{ConnectionWorker, Message, MessageFormatter, PairingSession, SendOptions}
+  alias Jido.Chat.WhatsApp.Storage.Split
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   @media_type_pattern ~r/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/
@@ -29,6 +34,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   @spec capabilities() :: map()
   def capabilities,
     do: %{
+      authenticate: :native,
       initialize: :fallback,
       shutdown: :fallback,
       send_message: :native,
@@ -57,6 +63,183 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       format_webhook_response: :native
     }
 
+  @doc "Runs shared owner-scoped authentication using trusted host callbacks."
+  @impl true
+  @spec authenticate(map(), term(), keyword()) :: Jido.Chat.Adapter.authentication_result()
+  def authenticate(request, owner_id, opts), do: PairingSession.authenticate(request, owner_id, opts)
+
+  @doc """
+  Explicitly logs out the selected running listener and clears its saved session.
+
+  This optional WhatsApp adapter extension delegates to `ConnectionWorker.logout/1`.
+  Pass the exact listener's `GenServer.server()` reference, not a profile or binding.
+  Returns `:ok` after transport logout and cleanup, `{:error, :logout_failed}`
+  on transport failure, `{:error, :storage_unavailable}` while storage recovery is
+  pending, or `{:error, :unsupported}` when the transport lacks logout support.
+  Normal `GenServer.call/2` exits (including missing listener and timeout) propagate.
+
+  Successful logout emits the existing `:logged_out` lifecycle notification through
+  `:sink_mfa`. Ordinary listener shutdown preserves the saved session. The host
+  retains authorization, listener selection and supervision responsibilities.
+  """
+  @spec logout(GenServer.server()) :: :ok | {:error, term()}
+  @impl true
+  def logout(listener), do: ConnectionWorker.logout(listener)
+
+  @doc """
+  Clears an existing account's configured storage without requiring a listener.
+
+  This package extension is independent of the shared Jido.Chat behaviour. A
+  saved binding requires a trusted `sink_mfa`; standalone storage requires an
+  explicit `profile` and uses existing connection options. No binding is created.
+  Hosts authorize the request and exclude concurrent startup/writes until their
+  disable/archive command completes. The selected transport must support cleanup.
+
+  `cleanup_timeout_ms` bounds execution to 1..10,000 ms (default 10,000). A timeout
+  is uncertain completion and must not trigger automatic retries. Errors are
+  sanitized; partial cleanup cannot be rolled back. Ordinary shutdown is unchanged.
+  """
+  @spec cleanup_connection(term(), keyword()) :: :ok | {:error, atom()}
+  def cleanup_connection(binding, opts) when is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         timeout when is_integer(timeout) and timeout in 1..10_000 <- Keyword.get(opts, :cleanup_timeout_ms, 10_000),
+         {:ok, transport} <- cleanup_transport(opts),
+         {:ok, config} <- cleanup_config(binding, opts) do
+      task = Task.async(fn -> invoke_cleanup(transport, config, opts) end)
+
+      case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+        {:ok, result} -> result
+        _ -> {:error, :cleanup_timeout}
+      end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_cleanup_request}
+    end
+  end
+
+  def cleanup_connection(_, _), do: {:error, :invalid_cleanup_request}
+
+  defp cleanup_transport(opts) do
+    transport = Keyword.get(opts, :transport, AmarulaClient)
+
+    with true <- is_atom(transport) and not is_nil(transport),
+         {:module, _} <- Code.ensure_loaded(transport),
+         true <- function_exported?(transport, :cleanup, 2) do
+      {:ok, transport}
+    else
+      _ -> {:error, :unsupported}
+    end
+  end
+
+  defp cleanup_config(nil, opts) do
+    case connection_options(nil, opts) do
+      %{} = config -> {:ok, config}
+      error -> error
+    end
+  end
+
+  defp cleanup_config(binding, opts) do
+    with {:ok, _} <- validate_sink_mfa(opts[:sink_mfa]) do
+      {:ok, connection_options(binding, opts)}
+    end
+  end
+
+  defp invoke_cleanup(transport, config, opts) do
+    case transport.cleanup(config, opts) do
+      :ok -> :ok
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _ -> {:error, :cleanup_failed}
+    end
+  rescue
+    _ -> {:error, :cleanup_failed}
+  catch
+    _, _ -> {:error, :cleanup_failed}
+  end
+
+  @doc "Prepares saved transport configuration from an opaque binding and trusted sink."
+  @spec connection_options(term(), keyword()) :: map() | {:error, term()}
+  @impl true
+  def connection_options(nil, opts) do
+    if is_binary(opts[:profile]),
+      do: Map.new(opts),
+      else: {:error, :missing_linked_device_profile}
+  end
+
+  def connection_options(binding, opts) do
+    storage = Split.binding_options(binding, opts)
+    %{profile: Keyword.fetch!(storage, :profile), storage: {Split, storage}}
+  end
+
+  @doc """
+  Prepares saved or authenticated connections with trusted storage and configurable history.
+
+  Boolean history flags in `:ingress` override trusted connection options. Omitted
+  flags retain the trusted value, falling back to `false`. Other persisted ingress
+  values cannot override the authenticated profile or storage configuration.
+  """
+  @impl true
+  @spec prepare_connection(keyword()) :: {:ok, map()} | {:error, term()}
+  def prepare_connection(opts) do
+    prepared =
+      case Keyword.get(opts, :connection_options) do
+        %{} = options -> {:ok, options}
+        nil -> prepare_saved_connection(opts)
+      end
+
+    with {:ok, options} <- prepared,
+         {:ok, history} <- prepared_history_options(Keyword.get(opts, :ingress, %{}), options) do
+      {:ok, options |> Map.merge(history) |> Map.put(:mode, :linked_device)}
+    end
+  end
+
+  defp prepared_history_options(ingress, options) when is_map(ingress) do
+    Enum.reduce_while([:sync_history, :sync_full_history], {:ok, %{}}, fn key, {:ok, acc} ->
+      value = Map.get(ingress, key, Map.get(ingress, Atom.to_string(key), Map.get(options, key, false)))
+
+      if is_boolean(value),
+        do: {:cont, {:ok, Map.put(acc, key, value)}},
+        else: {:halt, {:error, :invalid_history_options}}
+    end)
+  end
+
+  defp prepared_history_options(_, _), do: {:error, :invalid_history_options}
+
+  @doc "Returns stable opaque connector identity without requiring a running listener."
+  @impl true
+  @spec connection_identity(term()) :: {:ok, String.t()}
+  def connection_identity(binding), do: {:ok, Split.profile(binding)}
+
+  @doc "Returns shared storage specs requiring a RAM-only Mnesia schema for every host."
+  @impl true
+  @spec provider_child_specs(keyword()) :: {:ok, [Supervisor.child_spec()]}
+  def provider_child_specs(_opts) do
+    spec = storage_runtime_spec(require_ram_schema: true)
+    {:ok, [Supervisor.child_spec(spec, [])]}
+  end
+
+  # Requests the saved binding before a listener is registered.
+  @spec prepare_saved_connection(keyword()) :: {:ok, map()} | {:error, term()}
+  defp prepare_saved_connection(opts) do
+    with {:ok, binding} when not is_nil(binding) <-
+           Jido.Chat.WhatsApp.Storage.Request.call(opts[:sink_mfa], nil, %{op: :bind}),
+         options <- connection_options(binding, opts),
+         {module, storage_opts} <- options.storage,
+         :ok <- module.prepare(module.new(storage_opts)) do
+      {:ok, options}
+    else
+      {:ok, _} -> {:error, :invalid_binding}
+      error -> error
+    end
+  end
+
+  @doc "Returns the stable profile of a saved opaque binding without storage callbacks."
+  @spec connection_profile(term()) :: String.t()
+  def connection_profile(binding), do: Split.profile(binding)
+
+  @doc "Returns the shared package storage runtime with host-supplied deployment policy."
+  @spec storage_runtime_spec(keyword()) :: {module(), keyword()}
+  def storage_runtime_spec(opts), do: {Jido.Chat.WhatsApp.Storage.Runtime, opts}
+
   @impl true
   def listener_child_specs(bridge_id, opts \\ []) when is_binary(bridge_id) and is_list(opts) do
     ingress = normalize_ingress_opts(opts)
@@ -82,27 +265,48 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   end
 
   @impl true
-  def transform_incoming(%Amarula.Msg{} = msg) do
-    with {:ok, attrs} <- Message.incoming_attrs(msg) do
+  def transform_incoming(payload), do: transform_incoming(payload, [])
+
+  @doc """
+  Normalizes an incoming message with optional connection-scoped media references.
+
+  Supplying `:conn`, `:connection` or `:profile` seals media descriptors through
+  the transport. Only public media metadata and an opaque reference leave this
+  boundary; `raw` retains only normalized room, sender and timestamp facts.
+  The listener always uses this mode.
+  Without connection options, the legacy structured-reference API is preserved.
+  """
+  @spec transform_incoming(term(), keyword()) :: {:ok, Incoming.t()} | {:error, term()}
+  def transform_incoming(%{message: message}, opts) when is_map(message), do: transform_incoming(message, opts)
+  def transform_incoming(%{"message" => message}, opts) when is_map(message), do: transform_incoming(message, opts)
+
+  def transform_incoming(%{} = payload, opts) when is_list(opts) do
+    with {:ok, attrs} <- Message.incoming_attrs(payload),
+         {:ok, attrs} <- normalize_media_references(attrs, opts) do
       {:ok, Incoming.new(attrs)}
     end
   end
 
-  def transform_incoming(%{message: message}) when is_map(message), do: transform_incoming(message)
-  def transform_incoming(%{"message" => message}) when is_map(message), do: transform_incoming(message)
+  def transform_incoming(_, _), do: {:error, :unsupported_message_type}
 
-  def transform_incoming(%{} = payload) do
-    with {:ok, attrs} <- Message.incoming_attrs(payload) do
-      {:ok, Incoming.new(attrs)}
+  @impl true
+  def get_user(jid, opts \\ []) do
+    opts = SendOptions.new(opts)
+    client = transport(opts)
+
+    with true <-
+           (Code.ensure_loaded?(client) and function_exported?(client, :user_phone, 2)) || {:error, :unsupported},
+         {:ok, conn} <- client.resolve_conn(SendOptions.conn_opts(opts)),
+         {:ok, phone} <- client.user_phone(conn, jid) do
+      {:ok, UserInfo.new(%{id: jid, metadata: %{phone: phone}})}
     end
   end
-
-  def transform_incoming(_), do: {:error, :unsupported_message_type}
 
   @impl true
   def send_message(jid, text, opts \\ []) do
     opts = SendOptions.new(opts)
     jid = to_jid(jid)
+    text = MessageFormatter.render(text, opts.format)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
          {:ok, msg_id} <- transport(opts).send_text(conn, jid, text, SendOptions.text_transport_opts(opts)) do
@@ -141,15 +345,17 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   @doc """
   Fetches and decrypts the bytes behind an inbound WhatsApp media reference.
 
-  WhatsApp media needs the CDN path, media key, and encrypted-file hash. These
-  values are kept in the normalized media metadata and passed to Amarula. A
-  reference must contain a 32-byte media key and either a direct CDN path or an
-  HTTPS URL on a WhatsApp host.
+  Accepts a `whatsapp://media/v1/...` reference or normalized media containing
+  it. Supply the originating profile or connection in opts, as for sending.
+  The transport resolves the private descriptor using persisted credentials.
+  Legacy structured descriptors remain supported for trusted direct callers.
   """
   @impl true
   def fetch_media(reference, opts \\ []) when is_list(opts) do
-    with {:ok, media} <- amarula_media(reference) do
-      transport = Keyword.get(opts, :transport, AmarulaClient)
+    transport = Keyword.get(opts, :transport, AmarulaClient)
+
+    with {:ok, descriptor} <- resolve_media_reference(reference, transport, opts),
+         {:ok, media} <- amarula_media(descriptor) do
       transport.download_media(media)
     end
   end
@@ -158,6 +364,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
   def edit_message(jid, message_id, text, opts \\ []) do
     opts = SendOptions.new(opts)
     jid = to_jid(jid)
+    text = MessageFormatter.render(text, opts.format)
 
     with {:ok, conn} <- transport(opts).resolve_conn(SendOptions.conn_opts(opts)),
          {:ok, msg_id} <- transport(opts).send_edit(conn, {jid, to_string(message_id), true}, text) do
@@ -268,19 +475,19 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     end
   end
 
-  defp parse_payload_event(%{} = payload, _opts) do
+  defp parse_payload_event(%{} = payload, opts) do
     case payload_event(payload) do
       {:message, payload} ->
-        with {:ok, %Incoming{} = incoming} <- transform_incoming(payload) do
+        with {:ok, %Incoming{} = incoming} <- transform_incoming(payload, opts) do
           {:ok,
            EventEnvelope.new(%{
              adapter_name: :whatsapp,
              event_type: :message,
-             thread_id: Message.thread_id(to_string(incoming.external_room_id)),
+             thread_id: Message.thread_id(to_string(incoming.external_room_id), incoming.external_thread_id),
              channel_id: to_string(incoming.external_room_id),
              message_id: stringify(incoming.external_message_id),
              payload: incoming,
-             raw: payload,
+             raw: incoming.raw,
              metadata: %{source: :payload}
            })}
         end
@@ -373,7 +580,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
       media_opts =
         opts
         |> SendOptions.media_transport_opts()
-        |> Keyword.put_new(:caption, upload_caption(upload, opts))
+        |> Keyword.put(:caption, MessageFormatter.render(upload_caption(upload, opts), opts.format))
         |> Keyword.put_new(:file_name, upload.filename)
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
@@ -388,6 +595,77 @@ defmodule Jido.Chat.WhatsApp.Adapter do
 
   defp upload_caption(%FileUpload{} = upload, %SendOptions{} = opts) do
     opts.caption || upload.metadata[:caption] || upload.metadata["caption"]
+  end
+
+  defp normalize_media_references(%{media: []} = attrs, _opts), do: {:ok, attrs}
+
+  defp normalize_media_references(attrs, opts) do
+    if Enum.any?([:conn, :connection, :profile], &Keyword.get(opts, &1)) do
+      client = Keyword.get(opts, :transport, AmarulaClient)
+
+      with {:ok, conn} <- client.resolve_conn(opts),
+           {:ok, media} <- seal_media_entries(attrs.media, client, conn) do
+        facts = %{
+          channel_jid: attrs.external_room_id,
+          from_jid: attrs.external_user_id,
+          timestamp: if(is_integer(attrs.timestamp), do: attrs.timestamp)
+        }
+
+        {:ok, %{attrs | media: media, timestamp: facts.timestamp, raw: facts}}
+      end
+    else
+      {:ok, attrs}
+    end
+  end
+
+  defp seal_media_entries(entries, client, conn) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
+      with {:ok, descriptor} <- amarula_media(entry),
+           {:ok, reference} when is_binary(reference) <- media_callback(client, :media_reference, conn, descriptor) do
+        public = entry |> Map.put(:url, reference) |> Map.put(:metadata, %{file_id: reference})
+        {:cont, {:ok, acc ++ [public]}}
+      else
+        {:error, _} = error -> {:halt, error}
+        _ -> {:halt, {:error, :invalid_media_reference}}
+      end
+    end)
+  end
+
+  defp resolve_media_reference(reference, client, opts) do
+    case opaque_media_reference(reference) do
+      nil ->
+        {:ok, reference}
+
+      "whatsapp://media/v1/" <> _ = token when byte_size(token) <= 24_000 ->
+        with {:ok, conn} <- client.resolve_conn(opts) do
+          media_callback(client, :resolve_media_reference, conn, token)
+        end
+
+      _ ->
+        {:error, :invalid_media_reference}
+    end
+  end
+
+  defp opaque_media_reference(reference) when is_binary(reference), do: reference
+
+  defp opaque_media_reference(%{} = reference) do
+    metadata = map_get(reference, [:metadata, "metadata"])
+    metadata = if is_map(metadata), do: metadata, else: %{}
+
+    [map_get(metadata, [:file_id, "file_id"]), map_get(reference, [:url, "url"])]
+    |> Enum.find(fn value -> is_binary(value) and String.starts_with?(value, "whatsapp://media/") end)
+  end
+
+  defp opaque_media_reference(_), do: nil
+
+  defp media_callback(client, operation, conn, value) do
+    if Code.ensure_loaded?(client) and function_exported?(client, operation, 2),
+      do: apply(client, operation, [conn, value]),
+      else: {:error, :media_reference_unsupported}
+  rescue
+    _ -> {:error, :media_reference_unavailable}
+  catch
+    _, _ -> {:error, :media_reference_unavailable}
   end
 
   defp amarula_media(%Amarula.Content.Media{} = media), do: validate_amarula_media(media)
@@ -525,6 +803,7 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     [
       bridge_id: bridge_id,
       sink_mfa: sink_mfa,
+      identity_timeout_ms: Keyword.get(opts, :identity_timeout_ms, 2_500),
       sink_opts: [bridge_id: bridge_id],
       transport: get_map_value(ingress, [:transport, "transport"]) || AmarulaClient,
       config: connection_config(profile, ingress, opts),
@@ -540,13 +819,33 @@ defmodule Jido.Chat.WhatsApp.Adapter do
     |> ensure_map()
     |> Map.merge(get_map_value(ingress, [:amarula, "amarula", :config, "config"]) |> ensure_map())
     |> Map.put(:profile, profile)
+    |> put_history_options(ingress)
     |> maybe_put_storage(ingress)
+    |> then(fn config ->
+      case get_map_value(ingress, [:storage, "storage"]) do
+        nil -> config
+        storage -> Map.put(config, :storage, storage)
+      end
+    end)
+  end
+
+  defp put_history_options(config, ingress) do
+    Enum.reduce([:sync_history, :sync_full_history], config, fn key, acc ->
+      value =
+        Map.get(
+          ingress,
+          key,
+          Map.get(ingress, Atom.to_string(key), Map.get(acc, key, Map.get(acc, Atom.to_string(key), true)))
+        )
+
+      Map.put(acc, key, value)
+    end)
   end
 
   defp maybe_put_storage(config, ingress) do
     case get_map_value(ingress, [:storage_root, "storage_root"]) do
       nil -> config
-      root -> Map.put(config, :storage, {Amarula.Storage.File, root: root})
+      root -> Map.put(config, :storage_root, root)
     end
   end
 

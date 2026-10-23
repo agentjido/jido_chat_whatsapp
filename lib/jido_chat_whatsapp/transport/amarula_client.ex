@@ -1,6 +1,14 @@
 defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   @moduledoc """
   Default WhatsApp transport backed by `Amarula`.
+
+  Loads Amarula's installed modules before reading persisted protocol records so
+  safe term decoders recognize their atoms and structs even in a fresh VM.
+
+  Authenticated identity reads the supplied connection's state and `me` fields
+  with one-second call deadlines. Raw credentials remain inside this boundary.
+  Only PN/LID aliases and an optional account name are returned; Amarula may not
+  learn the name with history disabled. Identity reads never change history flags.
   """
 
   @behaviour Jido.Chat.WhatsApp.Transport
@@ -8,24 +16,328 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   require Logger
 
   alias Amarula.Protocol.Auth.QRCodeGenerator
+  alias Amarula.Protocol.Socket.ConnectionSupervisor
+  alias Jido.Chat.WhatsApp.Transport.{GuardedStorage, MediaReference}
+  alias Jido.Chat.WhatsApp.{AccountIdentity, Message}
+
+  @identity_call_timeout 1_000
+
+  @impl true
+  def media_reference(conn, media) do
+    with {:ok, secret, profile} <- media_reference_identity(conn) do
+      MediaReference.seal(media, secret, profile)
+    end
+  end
+
+  @impl true
+  def resolve_media_reference(conn, reference) do
+    with {:ok, secret, profile} <- media_reference_identity(conn) do
+      MediaReference.open(reference, secret, profile)
+    end
+  end
+
+  # Read the stable identity, not evolving Signal session records. The derived
+  # key is used only inside Transport and no new persistence writes are needed.
+  defp media_reference_identity(conn) do
+    with %{profile: profile} when is_atom(profile) or is_binary(profile) <-
+           GenServer.call(conn, :conn, @identity_call_timeout),
+         %{signed_identity_key: %{private: secret}} when is_binary(secret) and byte_size(secret) == 32 <-
+           GenServer.call(conn, :get_auth_creds, @identity_call_timeout),
+         true <- profile not in [nil, ""] do
+      {:ok, secret, to_string(profile)}
+    else
+      _ -> {:error, :media_reference_unavailable}
+    end
+  rescue
+    _ -> {:error, :media_reference_unavailable}
+  catch
+    :exit, _ -> {:error, :media_reference_unavailable}
+  end
+
+  @impl true
+  def user_phone(conn, jid) when is_binary(jid) do
+    case Message.normalize_jids([jid]) do
+      [normalized] ->
+        address =
+          if String.ends_with?(normalized, "@lid"),
+            do: Amarula.Contacts.pn_for_lid(conn, normalized),
+            else: normalized
+
+        pn = if is_struct(address, Amarula.Address), do: Amarula.Address.to_jid!(address), else: address
+        {:ok, phone_from_jid(pn)}
+
+      _ ->
+        {:error, :invalid_user}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  def user_phone(_, _), do: {:error, :invalid_user}
+
+  @impl true
+  def canonical_user_id(conn, jid) when is_binary(jid) do
+    case Message.normalize_jids([jid]) do
+      [normalized] ->
+        lid =
+          if String.ends_with?(normalized, "@s.whatsapp.net"),
+            do: Amarula.Contacts.lid_for_pn(conn, normalized)
+
+        case lid do
+          %Amarula.Address{kind: :lid} -> {:ok, Amarula.Address.to_jid!(lid)}
+          _ -> {:ok, normalized}
+        end
+
+      _ ->
+        {:error, :invalid_user}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  def canonical_user_id(_, _), do: {:error, :invalid_user}
+
+  defp phone_from_jid(jid) when is_binary(jid) do
+    case Regex.run(~r/^([0-9]+)@s\.whatsapp\.net$/, jid) do
+      [_, number] -> "+" <> number
+      _ -> nil
+    end
+  end
+
+  defp phone_from_jid(_), do: nil
+
+  @impl true
+  def account_jids(conn) do
+    with {:ok, me} <- account_me(conn) do
+      {:ok, Message.normalize_jids([me[:id], me[:lid]])}
+    end
+  end
+
+  @impl true
+  def account_identity(conn) do
+    with :connected <- GenServer.call(conn, :get_connection_state, @identity_call_timeout),
+         {:ok, me} <- account_me(conn) do
+      AccountIdentity.normalize(%{account_jids: [me[:id], me[:lid]], display_name: me[:name]})
+    else
+      {:error, :timeout} -> {:error, :timeout}
+      _ -> {:error, :unavailable}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  # Raw credentials stay inside this transport and are never returned to callers.
+  defp account_me(conn) do
+    me = conn |> GenServer.call(:get_auth_creds, @identity_call_timeout) |> Map.get(:me)
+    {:ok, if(is_map(me), do: Map.take(me, [:id, :lid, :name]), else: %{})}
+  rescue
+    _ -> {:error, :identity_unavailable}
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, _ -> {:error, :identity_unavailable}
+  end
 
   @impl true
   def ensure_started(_opts) do
-    case Process.whereis(Amarula.Supervisor) do
-      nil -> start_supervisor()
-      _pid -> :ok
+    with {:ok, _apps} <- Application.ensure_all_started(:jido_chat_whatsapp),
+         {:ok, _pid} <- Jido.Chat.WhatsApp.Transport.AmarulaRuntime.ready() do
+      :ok
+    else
+      _ -> {:error, :runtime_unavailable}
     end
   end
 
   @impl true
   def connect(config, opts) when is_map(config) and is_list(opts) do
-    config
-    |> Amarula.new()
-    |> Amarula.connect(opts)
+    with :ok <- validate_profile(config),
+         {:ok, _pid} <- Jido.Chat.WhatsApp.Transport.AmarulaRuntime.ready(),
+         :ok <- load_protocol_modules(),
+         {:ok, built} <- build_connection(config, opts),
+         {:ok, pid} <-
+           make_socket(built, Keyword.put(opts, :parent_pid, opts[:parent] || opts[:parent_pid] || self()), 20) do
+      finish_connect(pid)
+    end
+  rescue
+    _ -> {:error, :connection_failed}
+  catch
+    :exit, _ -> {:error, :connection_failed}
   end
 
   @impl true
-  def stop(conn, _opts), do: Amarula.stop(conn)
+  def stop({:via, Registry, {Amarula.InstanceRegistry, {instance, :connection}}}, _opts) do
+    case ConnectionSupervisor.stop_instance(instance) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+  catch
+    :exit, _ -> {:error, :stop_failed}
+  end
+
+  def stop(conn, _opts) do
+    case GenServer.whereis(conn) do
+      nil -> :ok
+      pid -> Amarula.stop(pid)
+    end
+  catch
+    :exit, _ -> {:error, :stop_failed}
+  end
+
+  @impl true
+  def logout(conn, _opts) do
+    with :ok <- Amarula.wipe_credentials(conn), do: stop(conn, [])
+  catch
+    :exit, _ -> {:error, :logout_failed}
+  end
+
+  @doc """
+  Clears the selected profile through its configured storage, without connecting.
+
+  Uses the same storage selection as startup, including upstream defaults and
+  prebuilt scopes. No credential reads or unrelated cache initialization occur.
+  Hosts must exclude concurrent connections/writes until disablement completes.
+  A partial storage failure is reported; cleared records cannot be rolled back.
+  """
+  @impl true
+  @spec cleanup(map(), keyword()) :: :ok | {:error, atom()}
+  def cleanup(config, opts) when is_map(config) and is_list(opts) do
+    with :ok <- validate_profile(config) do
+      # Amarula.new resolves upstream storage defaults. Prebuilt inert scopes
+      # avoid initializing configured caches unrelated to this storage operation.
+      conn =
+        config
+        |> storage_config(opts)
+        |> Map.put(:retry_cache, %Amarula.RetryCache.Scope{adapter: Amarula.RetryCache.ETS, state: nil})
+        |> Map.put(:message_secret_store, %Amarula.MessageSecretStore.Scope{
+          adapter: Amarula.MessageSecretStore.ETS,
+          state: nil
+        })
+        |> Amarula.new()
+
+      case Amarula.Storage.clear(conn.storage, conn.profile) do
+        :ok -> :ok
+        {:error, reason} when is_atom(reason) -> {:error, reason}
+        _ -> {:error, :cleanup_failed}
+      end
+    end
+  rescue
+    _ -> {:error, :cleanup_failed}
+  catch
+    _, _ -> {:error, :cleanup_failed}
+  end
+
+  def cleanup(_, _), do: {:error, :invalid_cleanup_request}
+
+  @impl true
+  def recovery_status(conn) do
+    # Amarula schedules retries while disconnected and moves to :closed when
+    # its retry budget is exhausted. A progressing handshake can already be
+    # :connected internally; only the subsequent :open event authenticates it.
+    case GenServer.call(conn, :get_connection_state, @identity_call_timeout) do
+      state when state in [:disconnected, :connecting, :connected] -> :reconnecting
+      _ -> :failed
+    end
+  rescue
+    _ -> :failed
+  catch
+    _, _ -> :failed
+  end
+
+  @impl true
+  def health(conn) do
+    case Amarula.Connection.get_conn(conn).storage do
+      %{adapter: GuardedStorage, state: state} ->
+        if GuardedStorage.healthy?(state), do: :ok, else: {:error, :storage_failed}
+
+      _ ->
+        :ok
+    end
+  catch
+    :exit, _ -> {:error, :connection_unavailable}
+  end
+
+  defp validate_profile(%{profile: profile}) when is_binary(profile) do
+    if profile not in ["", ".", ".."] and not String.contains?(profile, ["/", "\\", <<0>>]),
+      do: :ok,
+      else: {:error, :invalid_profile}
+  end
+
+  defp validate_profile(%{profile: profile}) when is_atom(profile) and not is_nil(profile),
+    do: validate_profile(%{profile: Atom.to_string(profile)})
+
+  defp validate_profile(_), do: {:error, :missing_profile}
+
+  defp load_protocol_modules do
+    with result when result in [:ok, {:error, {:already_loaded, :amarula}}] <- Application.load(:amarula),
+         :ok <- Code.ensure_all_loaded(Application.spec(:amarula, :modules)) do
+      :ok
+    else
+      _ -> {:error, :connection_failed}
+    end
+  end
+
+  defp build_connection(config, opts) do
+    conn = config |> storage_config(opts) |> Amarula.new()
+    # Fail before spawning the protocol tree on unreadable custom credentials.
+    _ = Amarula.Storage.get(conn.storage, conn.profile, :creds, :self)
+    {:ok, conn}
+  end
+
+  defp storage_config(config, opts) do
+    case Map.get(config, :storage) do
+      nil ->
+        case Map.get(config, :storage_root) do
+          nil -> config
+          root -> Map.put(config, :storage, {Amarula.Storage.File, root: root})
+        end
+
+      storage ->
+        Map.put(config, :storage, {GuardedStorage, storage: storage, notify: opts[:parent] || opts[:parent_pid]})
+    end
+  end
+
+  # Registry removes dead owners asynchronously after supervisor shutdown. Never
+  # adopt or stop a live duplicate; only wait for a dead registration to disappear.
+  defp make_socket(conn, opts, retries) do
+    case Amarula.Connection.make_socket(conn, opts) do
+      {:error, {:already_running, pid}} = error when retries > 0 ->
+        if Process.alive?(pid) do
+          error
+        else
+          Process.sleep(1)
+          make_socket(conn, opts, retries - 1)
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp finish_connect(pid) do
+    instance = GenServer.call(pid, :instance_id)
+    server = ConnectionSupervisor.name(instance, :connection)
+
+    case open_socket(pid) do
+      :ok ->
+        {:ok, server}
+
+      {:error, _} ->
+        stop(server, [])
+        {:error, :connection_failed}
+    end
+  end
+
+  defp open_socket(pid) do
+    Amarula.Connection.connect(pid)
+  catch
+    :exit, _ -> {:error, :connection_failed}
+  end
 
   @impl true
   def render_qr(qr, _opts) when is_binary(qr), do: QRCodeGenerator.render_terminal(qr)
@@ -101,12 +413,18 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
   @impl true
   def request_pairing_code(conn, phone, opts), do: Amarula.request_pairing_code(conn, phone, opts)
 
-  defp start_supervisor do
-    case Amarula.Supervisor.start_link() do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, reason} -> {:error, reason}
+  @impl true
+  def connection_processes({:via, Registry, {Amarula.InstanceRegistry, {instance, :connection}}}) do
+    with {:ok, runtime} <- Jido.Chat.WhatsApp.Transport.AmarulaRuntime.ready(),
+         pid when is_pid(pid) <- GenServer.whereis(ConnectionSupervisor.supervisor_name(instance)) do
+      {:ok, [runtime, pid]}
+    else
+      _ -> {:error, :connection_failed}
     end
+  rescue
+    _ -> {:error, :connection_failed}
+  catch
+    :exit, _ -> {:error, :connection_failed}
   end
 
   defp resolve_profile(profile) do

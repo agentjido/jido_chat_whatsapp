@@ -28,7 +28,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
       dialyzer: [
         plt_local_path: "priv/plts/project.plt",
         plt_core_path: "priv/plts/core.plt",
-        plt_add_apps: [:mix]
+        plt_add_apps: [:mix, :ex_unit]
       ]
     ]
   end
@@ -48,7 +48,8 @@ defmodule Jido.Chat.WhatsApp.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      mod: {Jido.Chat.WhatsApp.Application, []},
+      extra_applications: [:logger, :mnesia]
     ]
   end
 
@@ -57,11 +58,13 @@ defmodule Jido.Chat.WhatsApp.MixProject do
 
   defp deps do
     [
-      {:jido_chat, "~> 1.2 and >= 1.2.1"},
-      {:amarula, "~> 0.5.0"},
+      {:jido_chat, git: "https://github.com/jat10/jido_chat.git", branch: "feat/shared-pairing-capability"},
+      {:amarula, "~> 0.5.10"},
+      {:earmark_parser, "~> 1.4.46"},
       {:protobuf, "~> 0.17.0", override: true},
       {:zoi, "~> 0.18.11"},
       {:dotenvy, "~> 1.1", only: [:test]},
+      {:stream_data, "~> 1.1", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.21", only: [:dev, :test], runtime: false},
@@ -113,6 +116,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
         "CHANGELOG.md",
         "docs/whatsapp_adapter_plan.md",
         "docs/preview_validation.md",
+        "docs/adapter_contracts.md",
         "CONTRIBUTING.md"
       ]
     ]

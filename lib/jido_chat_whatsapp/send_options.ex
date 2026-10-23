@@ -1,14 +1,20 @@
 defmodule Jido.Chat.WhatsApp.SendOptions do
   @moduledoc """
-  Typed options for WhatsApp send operations.
+  Typed options for WhatsApp send and edit operations.
+
+  Canonical `format: :markdown` (or `"markdown"`) renders text and media captions.
+  Absent, plain-text, HTML, and unknown formats preserve source text; HTML
+  rendering is unsupported. See `Jido.Chat.WhatsApp.MessageFormatter`.
   """
 
+  alias Jido.Chat.WhatsApp.MessageFormatter
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   @schema Zoi.struct(
             __MODULE__,
             %{
               transport: Zoi.any() |> Zoi.default(AmarulaClient),
+              format: Zoi.enum([:markdown, :plain_text]) |> Zoi.default(:plain_text),
               conn: Zoi.any() |> Zoi.nullish(),
               connection: Zoi.any() |> Zoi.nullish(),
               profile: Zoi.any() |> Zoi.nullish(),
@@ -41,7 +47,12 @@ defmodule Jido.Chat.WhatsApp.SendOptions do
   def new(opts) when is_list(opts), do: opts |> Map.new() |> new()
 
   def new(opts) when is_map(opts) do
-    Jido.Chat.Schema.parse!(__MODULE__, @schema, opts)
+    format = MessageFormatter.normalize_format(Map.get(opts, :format) || Map.get(opts, "format"))
+
+    opts
+    |> Map.delete("format")
+    |> Map.put(:format, format)
+    |> then(&Jido.Chat.Schema.parse!(__MODULE__, @schema, &1))
   end
 
   @doc "Builds connection-level options consumed by the transport client."

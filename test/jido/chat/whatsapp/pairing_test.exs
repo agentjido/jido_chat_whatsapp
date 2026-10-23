@@ -7,7 +7,7 @@ defmodule Jido.Chat.WhatsApp.PairingTest do
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   defmodule FakeTransport do
-    @behaviour Jido.Chat.WhatsApp.Transport
+    use Jido.Chat.WhatsApp.TransportStub
 
     def ensure_started(opts) do
       send(owner(opts), {:transport, :ensure_started})
@@ -38,31 +38,17 @@ defmodule Jido.Chat.WhatsApp.PairingTest do
       end
     end
 
-    def resolve_conn(_opts), do: {:error, :not_used}
-    def send_text(_conn, _jid, _text, _opts), do: {:error, :not_used}
-    def send_media(_conn, _jid, _media_type, _data, _opts), do: {:error, :not_used}
-    def download_media(_media), do: {:error, :not_used}
-    def send_reaction(_conn, _message_ref, _emoji), do: {:error, :not_used}
-    def send_edit(_conn, _message_ref, _text), do: {:error, :not_used}
-    def send_revoke(_conn, _message_ref), do: {:error, :not_used}
-    def send_chatstate(_conn, _jid, _state), do: {:error, :not_used}
-    def request_pairing_code(_conn, _phone, _opts), do: {:error, :not_used}
-
     defp owner(opts), do: Keyword.fetch!(opts, :test_pid)
   end
 
   test "the Amarula transport starts or reuses the shared supervisor" do
-    if supervisor = Process.whereis(Amarula.Supervisor) do
-      Supervisor.stop(supervisor)
-    end
-
     assert :ok = AmarulaClient.ensure_started([])
     supervisor = Process.whereis(Amarula.Supervisor)
     assert is_pid(supervisor)
 
     assert :ok = AmarulaClient.ensure_started([])
     assert Process.whereis(Amarula.Supervisor) == supervisor
-    assert :ok = Supervisor.stop(supervisor)
+    assert Process.alive?(supervisor)
   end
 
   test "pairing starts the transport before connect and cleans up on timeout" do

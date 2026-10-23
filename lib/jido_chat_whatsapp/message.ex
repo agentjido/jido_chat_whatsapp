@@ -43,48 +43,66 @@ defmodule Jido.Chat.WhatsApp.Message do
     type = payload |> map_get([:type, "type"]) |> normalize_type()
     payload_metadata = payload |> map_get([:metadata, "metadata"]) |> normalize_metadata()
 
-    if is_nil(channel_jid) do
-      {:error, :missing_channel}
-    else
-      chat_type = chat_type(channel_jid)
+    cond do
+      is_nil(channel_jid) ->
+        {:error, :missing_channel}
 
-      {:ok,
-       %{
-         external_room_id: channel_jid,
-         external_user_id: from_jid,
-         text: map_get(payload, [:text, "text"]) || text_for(type, map_get(payload, [:content, "content"])),
-         media: media_for(type, map_get(payload, [:content, "content"])),
-         username: from_jid,
-         display_name: map_get(payload, [:pushname, "pushname"]),
-         external_message_id: map_get(payload, [:id, "id"]),
-         external_reply_to_id: quoted_id(map_get(payload, [:quoted, "quoted"])),
-         timestamp: normalize_timestamp(map_get(payload, [:timestamp, "timestamp"])),
-         chat_type: chat_type,
-         chat_title: nil,
-         external_thread_id: nil,
-         delivery_external_room_id: channel_jid,
-         channel_meta: %{
-           adapter_name: :whatsapp,
+      chat_type(channel_jid) == :unsupported ->
+        {:error, :unsupported_chat_type}
+
+      true ->
+        chat_type = chat_type(channel_jid)
+        aliases = normalize_jids(map_get(payload, [:account_jids, "account_jids"]))
+
+        mentions =
+          Enum.map(normalize_jids(map_get(payload, [:mentions, "mentions"])), &%{user_id: &1, is_self: &1 in aliases})
+
+        from_me = truthy?(map_get(payload, [:from_me, "from_me"]))
+        from_jid = from_jid || if(from_me, do: List.first(aliases) || "unknown")
+        display_name = normalize_pushname(map_get(payload, [:pushname, "pushname"]))
+        thread_id = reply_thread_id(map_get(payload, [:quoted, "quoted"]), channel_jid)
+
+        {:ok,
+         %{
            external_room_id: channel_jid,
-           external_thread_id: nil,
-           delivery_external_room_id: channel_jid,
+           external_user_id: from_jid,
+           author: author(from_jid, from_me, display_name),
+           mentions: mentions,
+           was_mentioned: Enum.any?(mentions, & &1.is_self),
+           text: map_get(payload, [:text, "text"]) || text_for(type, map_get(payload, [:content, "content"])),
+           media: media_for(type, map_get(payload, [:content, "content"])),
+           username: from_jid,
+           display_name: display_name,
+           external_message_id: map_get(payload, [:id, "id"]),
+           timestamp: normalize_timestamp(map_get(payload, [:timestamp, "timestamp"])),
            chat_type: chat_type,
            chat_title: nil,
-           is_dm: chat_type == :dm,
-           metadata: %{to_jid: to_jid}
-         },
-         raw: payload,
-         metadata: %{
-           from_me: truthy?(map_get(payload, [:from_me, "from_me"])),
-           message_type: type,
-           to_jid: to_jid,
-           forwarded:
-             truthy?(
-               map_get(payload, [:forwarded, "forwarded"]) || map_get(payload_metadata, [:forwarded, "forwarded"])
-             ),
-           preview: map_get(payload, [:preview, "preview"]) || map_get(payload_metadata, [:preview, "preview"])
-         }
-       }}
+           external_thread_id: thread_id,
+           delivery_external_room_id: channel_jid,
+           channel_meta: %{
+             adapter_name: :whatsapp,
+             external_room_id: channel_jid,
+             external_thread_id: thread_id,
+             delivery_external_room_id: channel_jid,
+             chat_type: chat_type,
+             chat_title: nil,
+             is_dm: chat_type == :dm,
+             metadata: %{to_jid: to_jid}
+           },
+           raw: payload,
+           metadata: %{
+             history: map_get(payload_metadata, [:history, "history"]) == true,
+             profile: map_get(payload_metadata, [:profile, "profile"]),
+             from_me: truthy?(map_get(payload, [:from_me, "from_me"])),
+             message_type: type,
+             to_jid: to_jid,
+             forwarded:
+               truthy?(
+                 map_get(payload, [:forwarded, "forwarded"]) || map_get(payload_metadata, [:forwarded, "forwarded"])
+               ),
+             preview: map_get(payload, [:preview, "preview"]) || map_get(payload_metadata, [:preview, "preview"])
+           }
+         }}
     end
   end
 
@@ -118,6 +136,11 @@ defmodule Jido.Chat.WhatsApp.Message do
   @spec thread_id(String.t() | nil) :: String.t() | nil
   def thread_id(nil), do: nil
   def thread_id(jid), do: "whatsapp:#{jid}"
+
+  @doc "Returns the chat-scoped routing key for an immediate reply target."
+  @spec thread_id(String.t(), String.t() | nil) :: String.t()
+  def thread_id(jid, nil), do: thread_id(jid)
+  def thread_id(jid, target), do: "whatsapp:#{jid}:#{target}"
 
   @doc "Converts an Amarula address, normalized address map, or JID string to a JID string."
   @spec address_to_jid(term()) :: String.t() | nil
@@ -170,6 +193,13 @@ defmodule Jido.Chat.WhatsApp.Message do
     do: struct |> Map.from_struct() |> normalize_content_map()
 
   defp normalize_content_value({jid, id}), do: %{jid: address_to_jid(jid), id: id}
+
+  defp normalize_content_value({jid, id, from_me}),
+    do: %{jid: address_to_jid(jid), id: id, from_me: from_me}
+
+  defp normalize_content_value({jid, id, from_me, participant}),
+    do: %{jid: address_to_jid(jid), id: id, from_me: from_me, participant: address_to_jid(participant)}
+
   defp normalize_content_value(value) when is_map(value), do: normalize_content_map(value)
   defp normalize_content_value(value) when is_list(value), do: Enum.map(value, &normalize_content_value/1)
   defp normalize_content_value(value), do: value
@@ -237,16 +267,25 @@ defmodule Jido.Chat.WhatsApp.Message do
     |> String.downcase()
   end
 
-  defp quoted_id(nil), do: nil
-  defp quoted_id(quoted) when is_map(quoted), do: map_get(quoted, [:id, "id"])
-  defp quoted_id(_), do: nil
+  defp reply_thread_id(quoted, room) when is_map(quoted) do
+    id = map_get(quoted, [:id, "id"])
+    channel = map_get(quoted, [:channel_jid, "channel_jid", :channel, "channel"])
+
+    if is_binary(id) and byte_size(id) <= 255 and String.valid?(id) and
+         String.trim(id) != "" and (is_nil(channel) or address_to_jid(channel) == room) do
+      id
+    end
+  end
+
+  defp reply_thread_id(_, _), do: nil
 
   defp reaction_key(%{jid: jid, id: id}, _payload), do: {address_to_jid(jid), id}
   defp reaction_key(%{"jid" => jid, "id" => id}, _payload), do: {address_to_jid(jid), id}
   defp reaction_key({jid, id}, _payload), do: {address_to_jid(jid), id}
+  defp reaction_key({jid, id, _from_me}, _payload), do: {address_to_jid(jid), id}
+  defp reaction_key({jid, id, _from_me, _participant}, _payload), do: {address_to_jid(jid), id}
 
-  defp reaction_key(_key, payload),
-    do: {payload |> map_get([:channel_jid, "channel_jid"]) |> address_to_jid(), map_get(payload, [:id, "id"])}
+  defp reaction_key(_key, _payload), do: {nil, nil}
 
   defp reaction_user(payload) do
     user_id = map_get(payload, [:from_jid, "from_jid"]) || "unknown"
@@ -273,8 +312,38 @@ defmodule Jido.Chat.WhatsApp.Message do
   defp server_for(:group), do: "g.us"
 
   defp chat_type(jid) when is_binary(jid) do
-    if String.ends_with?(jid, "@g.us"), do: :group, else: :dm
+    cond do
+      String.ends_with?(jid, "@g.us") -> :group
+      String.ends_with?(jid, ["@s.whatsapp.net", "@lid"]) -> :dm
+      true -> :unsupported
+    end
   end
+
+  @doc "Normalizes an identity JID by removing its device suffix."
+  @spec identity_jid(term()) :: String.t() | nil
+  def identity_jid(value) do
+    case address_to_jid(value) do
+      nil -> nil
+      jid -> Regex.replace(~r/:[0-9]+@/, jid, "@")
+    end
+  end
+
+  @doc "Normalizes and deduplicates JID aliases using the same identity rules as mentions."
+  @spec normalize_jids(term()) :: [String.t()]
+  def normalize_jids(values),
+    do: values |> List.wrap() |> Enum.map(&identity_jid/1) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+
+  defp author(nil, _self, _name), do: nil
+  defp author(jid, is_self, name), do: %{user_id: jid, user_name: jid, full_name: name, is_me: is_self}
+
+  defp normalize_pushname(name) when is_binary(name) do
+    case String.trim(name) do
+      name when name in ["", "~"] -> nil
+      name -> name
+    end
+  end
+
+  defp normalize_pushname(_), do: nil
 
   defp normalize_timestamp(nil), do: nil
   defp normalize_timestamp(value) when is_integer(value), do: value
