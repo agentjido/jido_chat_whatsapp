@@ -1,4 +1,5 @@
 defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: false
   use ExUnitProperties
 
@@ -269,13 +270,7 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
     IO.puts("default_cleanup=ok")
     """
 
-    paths = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)])
-
-    assert {output, 0} =
-             System.cmd(System.find_executable("elixir"), paths ++ ["-e", script, root],
-               stderr_to_stdout: true,
-               env: [{"ERL_FLAGS", "+S 2:2"}]
-             )
+    assert {output, 0} = fresh_vm(script, [root])
 
     assert output =~ "default_cleanup=ok"
   end

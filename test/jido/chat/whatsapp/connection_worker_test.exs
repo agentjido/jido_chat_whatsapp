@@ -1,9 +1,9 @@
 defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: false
 
   alias Jido.Chat.WhatsApp.ConnectionWorker
-  alias Amarula.{Address, Msg}
-  alias Amarula.Protocol.Proto
+  alias Amarula.Address
 
   defmodule Sink do
     def emit(test_pid, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: metadata}}, opts) do
@@ -139,14 +139,12 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
   test "chat ingress gets payloads enriched through transport" do
     {_pid, parent, _} = worker()
 
-    msg = %Msg{
-      id: "msg-1",
-      channel: Address.pn("123"),
-      from: Address.pn("456"),
-      type: :text,
-      content: "hello",
-      raw: %Proto.Message{}
-    }
+    msg =
+      message(
+        id: "msg-1",
+        channel: Address.pn("123"),
+        from: Address.pn("456")
+      )
 
     send(parent, {:amarula, :messages_upsert, %{id: "batch-1", messages: [msg]}})
     assert_receive {:sink_emit, %{id: "msg-1", channel_jid: "123@s.whatsapp.net"} = payload, opts}
@@ -163,15 +161,15 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
           {"120363@g.us", "answer-group", true, "456@lid"}
         ],
         emoji <- ["👍", ""] do
-      msg = %Msg{
-        id: "reaction-wire-id",
-        channel: Address.pn("999"),
-        from: Address.lid("456"),
-        from_me: false,
-        type: :reaction,
-        content: %Amarula.Content.Reaction{key: key, emoji: emoji},
-        raw: %Proto.Message{}
-      }
+      msg =
+        message(
+          id: "reaction-wire-id",
+          channel: Address.pn("999"),
+          from: Address.lid("456"),
+          from_me: false,
+          type: :reaction,
+          content: %Amarula.Content.Reaction{key: key, emoji: emoji}
+        )
 
       send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
 
@@ -190,14 +188,12 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     room = "120363@g.us"
 
     for sender <- [Address.pn("15550001111"), Address.lid("987654")] do
-      msg = %Msg{
-        id: "message",
-        channel: Address.group("120363"),
-        from: sender,
-        type: :text,
-        content: "hello",
-        raw: %Proto.Message{}
-      }
+      msg =
+        message(
+          id: "message",
+          channel: Address.group("120363"),
+          from: sender
+        )
 
       send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
       assert_receive {:sink_emit, %{from_jid: "987654@lid", channel_jid: ^room}, _}
@@ -224,14 +220,14 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
     {_pid, parent, _profile} = worker()
 
     for phone <- ["15550002222", "15550003333"] do
-      msg = %Msg{
-        id: "reaction",
-        channel: Address.group("120363"),
-        from: Address.pn(phone),
-        type: :reaction,
-        content: %Amarula.Content.Reaction{key: {"120363@g.us", "target", false}, emoji: "👍"},
-        raw: %Proto.Message{}
-      }
+      msg =
+        message(
+          id: "reaction",
+          channel: Address.group("120363"),
+          from: Address.pn(phone),
+          type: :reaction,
+          content: %Amarula.Content.Reaction{key: {"120363@g.us", "target", false}, emoji: "👍"}
+        )
 
       send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
       assert_receive {:sink_emit, %Jido.Chat.EventEnvelope{event_type: :reaction, payload: event}, _}
@@ -242,14 +238,14 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorkerTest do
   test "malformed reaction targets are rejected instead of emitted as text payloads" do
     {pid, parent, _profile} = worker()
 
-    msg = %Msg{
-      id: "reaction-wire-id",
-      channel: Address.pn("123"),
-      from: Address.lid("456"),
-      type: :reaction,
-      content: %Amarula.Content.Reaction{key: nil, emoji: "👍"},
-      raw: %Proto.Message{}
-    }
+    msg =
+      message(
+        id: "reaction-wire-id",
+        channel: Address.pn("123"),
+        from: Address.lid("456"),
+        type: :reaction,
+        content: %Amarula.Content.Reaction{key: nil, emoji: "👍"}
+      )
 
     send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
     refute_receive {:sink_emit, _, _}

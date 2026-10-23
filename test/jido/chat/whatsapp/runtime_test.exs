@@ -1,43 +1,13 @@
 defmodule Jido.Chat.WhatsApp.RuntimeTest do
   use Jido.Chat.WhatsApp.RuntimeCase, async: false
+  import Jido.Chat.WhatsApp.TestHelpers
 
-  alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
+  alias Jido.Chat.WhatsApp.TestStorage, as: Store
+
+  alias Jido.Chat.WhatsApp.ConnectionWorker
   alias Jido.Chat.WhatsApp.Transport.{AmarulaClient, AmarulaRuntime, RuntimeHealth}
 
   @moduletag capture_log: true
-
-  defmodule Store do
-    def new(opts), do: Keyword.fetch!(opts, :table)
-
-    def get(table, profile, namespace, key) do
-      case :ets.lookup(table, {profile, namespace, key}) do
-        [{_, value}] -> {:ok, value}
-        [] -> :error
-      end
-    end
-
-    def put(table, profile, namespace, key, value) do
-      :ets.insert(table, {{profile, namespace, key}, value})
-      :ok
-    end
-
-    def delete(table, profile, namespace, key) do
-      :ets.delete(table, {profile, namespace, key})
-      :ok
-    end
-
-    def clear(table, profile) do
-      :ets.match_delete(table, {{profile, :_, :_}, :_})
-      :ok
-    end
-
-    def list_keys(_, _, _), do: {:ok, []}
-    def list_profiles(_), do: {:ok, []}
-  end
-
-  defmodule Sink do
-    def emit(pid, event, _opts), do: send(pid, {:event, event})
-  end
 
   setup do
     table = :ets.new(:runtime_storage, [:public, :set])
@@ -191,32 +161,23 @@ defmodule Jido.Chat.WhatsApp.RuntimeTest do
   end
 
   defp start_listener(profile, config) do
-    {:ok, [spec]} =
-      Adapter.listener_child_specs(profile,
-        ingress: %{profile: profile, mode: :linked_device, config: config, storage: config.storage},
-        sink_mfa: {Sink, :emit, [self()]}
-      )
-
-    start_supervised!(spec)
+    start_listener(profile, %{profile: profile, mode: :linked_device, config: config, storage: config.storage},
+      sink_mfa: sink(:event)
+    )
   end
 
-  defp await_listener(profile, previous, attempts \\ 500)
-  defp await_listener(_profile, _previous, 0), do: flunk("listener did not recover")
-
-  defp await_listener(profile, previous, attempts) do
+  defp await_listener(profile, previous) do
     {:ok, supervisor} = ExUnit.fetch_test_supervisor()
 
-    case List.keyfind(
-           Supervisor.which_children(supervisor),
-           {:whatsapp_connection_worker, profile},
-           0
-         ) do
-      {_, pid, _, _} when is_pid(pid) and pid != previous ->
-        pid
-
-      _ ->
-        Process.sleep(10)
-        await_listener(profile, previous, attempts - 1)
-    end
+    eventually(
+      fn ->
+        case List.keyfind(Supervisor.which_children(supervisor), {:whatsapp_connection_worker, profile}, 0) do
+          {_, pid, _, _} when is_pid(pid) and pid != previous -> pid
+          _ -> false
+        end
+      end,
+      500,
+      10
+    )
   end
 end

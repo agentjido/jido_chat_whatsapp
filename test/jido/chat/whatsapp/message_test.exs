@@ -1,8 +1,8 @@
 defmodule Jido.Chat.WhatsApp.MessageTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: true
 
   alias Amarula.Address
-  alias Amarula.Protocol.Proto
   alias Jido.Chat.ReactionEvent
   alias Jido.Chat.WhatsApp.Message
 
@@ -20,22 +20,20 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
   end
 
   test "to_payload/2 converts Amarula message structs into plain maps" do
-    msg = %Amarula.Msg{
-      id: "msg-1",
-      channel: Address.pn("15551234567"),
-      from: Address.pn("15557654321"),
-      to: Address.pn("15551234567"),
-      from_me: false,
-      pushname: "Alice",
-      timestamp: 1_706_745_600,
-      type: :text,
-      content: "hello",
-      quoted: %{id: "q1", from: Address.pn("15550000000"), channel: Address.pn("15551234567")},
-      mentions: [Address.pn("15559990000")],
-      forwarded: true,
-      preview: %Amarula.Content.LinkPreview{url: "https://jido.run", title: "Jido"},
-      raw: %Proto.Message{}
-    }
+    msg =
+      message(
+        id: "msg-1",
+        channel: Address.pn("15551234567"),
+        from: Address.pn("15557654321"),
+        to: Address.pn("15551234567"),
+        from_me: false,
+        pushname: "Alice",
+        timestamp: 1_706_745_600,
+        quoted: %{id: "q1", from: Address.pn("15550000000"), channel: Address.pn("15551234567")},
+        mentions: [Address.pn("15559990000")],
+        forwarded: true,
+        preview: %Amarula.Content.LinkPreview{url: "https://jido.run", title: "Jido"}
+      )
 
     payload = Message.to_payload(msg, %{batch_id: "batch-1"})
 

@@ -1,6 +1,7 @@
 defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
   use ExUnit.Case, async: true
 
+  import Jido.Chat.WhatsApp.TestHelpers
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
 
   defmodule Transport do
@@ -78,16 +79,7 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
     test_pid = self()
 
     session =
-      start_supervised!(%{
-        id: make_ref(),
-        start:
-          {Agent, :start_link,
-           [
-             fn ->
-               Map.merge(%{identity: identity(), test_pid: test_pid}, data)
-             end
-           ]}
-      })
+      start_supervised!({Agent, fn -> Map.merge(%{identity: identity(), test_pid: test_pid}, data) end}, id: make_ref())
 
     profile = "identity_#{System.unique_integer([:positive])}"
     sink = if opts[:reentrant_sink], do: {ReentrantSink, :emit, [self(), session]}, else: {Sink, :emit, [self()]}
@@ -311,17 +303,15 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
     open(parent, profile)
     available(profile)
 
-    msg = %Amarula.Msg{
-      id: "self",
-      channel: Amarula.Address.group("group"),
-      from_me: true,
-      from: Amarula.Address.pn("123"),
-      mentions: [Amarula.Address.lid("123")],
-      type: :text,
-      content: "hello",
-      pushname: "Sender name",
-      raw: %Amarula.Protocol.Proto.Message{}
-    }
+    msg =
+      message(
+        id: "self",
+        channel: Amarula.Address.group("group"),
+        from_me: true,
+        from: Amarula.Address.pn("123"),
+        mentions: [Amarula.Address.lid("123")],
+        pushname: "Sender name"
+      )
 
     send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
     assert_receive {:chat, payload}

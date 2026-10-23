@@ -1,4 +1,5 @@
 defmodule Jido.Chat.WhatsApp.ConnectionDefaultsTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: false
 
   alias Jido.Chat.Storage.Request
@@ -68,7 +69,6 @@ defmodule Jido.Chat.WhatsApp.ConnectionDefaultsTest do
   test "adapter rejects disk schemas while explicitly configured raw storage remains available" do
     directory = Path.join(System.tmp_dir!(), "whatsapp-schema-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
-    ebin = Application.app_dir(:jido_chat_whatsapp, "ebin")
 
     script = """
     Process.flag(:trap_exit, true)
@@ -86,7 +86,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionDefaultsTest do
     IO.puts("SCHEMA_POLICY_OK")
     """
 
-    {output, status} = System.cmd("elixir", ["--erl", "+S 2:2", "-pa", ebin, "-e", script], stderr_to_stdout: true)
+    {output, status} = fresh_vm(script, [], paths: [Application.app_dir(:jido_chat_whatsapp, "ebin")])
     assert status == 0, output
     assert output =~ "SCHEMA_POLICY_OK"
   end

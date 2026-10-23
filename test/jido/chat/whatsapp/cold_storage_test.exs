@@ -1,4 +1,5 @@
 defmodule Jido.Chat.WhatsApp.ColdStorageTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: true
 
   alias Amarula.Protocol.Auth.AuthUtils
@@ -53,11 +54,6 @@ defmodule Jido.Chat.WhatsApp.ColdStorageTest do
     {:error, :connection_failed} = Jido.Chat.WhatsApp.Transport.AmarulaClient.connect(config, [])
     """
 
-    paths = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)])
-
-    System.cmd(System.find_executable("elixir"), paths ++ ["-e", script, Base.encode64(bytes)],
-      stderr_to_stdout: true,
-      env: [{"ERL_FLAGS", "+S 2:2"}]
-    )
+    fresh_vm(script, [Base.encode64(bytes)])
   end
 end

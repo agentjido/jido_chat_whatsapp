@@ -1,53 +1,23 @@
 defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: false
 
-  alias Amarula.{Address, Msg}
-  alias Amarula.Protocol.Proto
+  alias Amarula.Address
   alias Jido.Chat.Incoming
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
 
   defmodule IngressTransport do
-    @behaviour Jido.Chat.WhatsApp.Transport
+    use Jido.Chat.WhatsApp.TransportStub
 
     @impl true
     def connect(config, opts) do
       send(Map.fetch!(config, :test_pid), {:transport_connected, opts[:parent]})
       {:ok, self()}
     end
-
-    @impl true
-    def resolve_conn(_opts), do: {:error, :not_used}
-
-    @impl true
-    def send_text(_conn, _jid, _text, _opts), do: {:error, :not_used}
-
-    @impl true
-    def send_media(_conn, _jid, _media_type, _data, _opts), do: {:error, :not_used}
-
-    @impl true
-    def download_media(_media), do: {:error, :not_used}
-
-    @impl true
-    def send_reaction(_conn, _message_ref, _emoji), do: {:error, :not_used}
-
-    @impl true
-    def send_edit(_conn, _message_ref, _text), do: {:error, :not_used}
-
-    @impl true
-    def send_revoke(_conn, _message_ref), do: {:error, :not_used}
-
-    @impl true
-    def send_chatstate(_conn, _jid, _state), do: {:error, :not_used}
-
-    @impl true
-    def request_pairing_code(_conn, _phone, _opts), do: {:error, :not_used}
   end
 
   defmodule OutboundTransport do
-    @behaviour Jido.Chat.WhatsApp.Transport
-
-    @impl true
-    def connect(_config, _opts), do: {:error, :not_used}
+    use Jido.Chat.WhatsApp.TransportStub
 
     @impl true
     def resolve_conn(opts), do: Keyword.fetch(opts, :conn)
@@ -57,27 +27,6 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
       send(conn, {:reply_sent, jid, text, opts})
       {:ok, "wamid.local-reply"}
     end
-
-    @impl true
-    def send_media(_conn, _jid, _media_type, _data, _opts), do: {:error, :not_used}
-
-    @impl true
-    def download_media(_media), do: {:error, :not_used}
-
-    @impl true
-    def send_reaction(_conn, _message_ref, _emoji), do: {:error, :not_used}
-
-    @impl true
-    def send_edit(_conn, _message_ref, _text), do: {:error, :not_used}
-
-    @impl true
-    def send_revoke(_conn, _message_ref), do: {:error, :not_used}
-
-    @impl true
-    def send_chatstate(_conn, _jid, _state), do: {:error, :not_used}
-
-    @impl true
-    def request_pairing_code(_conn, _phone, _opts), do: {:error, :not_used}
   end
 
   defmodule ReplySink do
@@ -122,18 +71,16 @@ defmodule Jido.Chat.WhatsApp.PreviewIntegrationTest do
     assert_receive {:lifecycle_action, %Jido.Chat.ActionEvent{metadata: %{status: :connected}}}
     refute_received {:reply_sent, _, _, _}
 
-    incoming_message = %Msg{
-      id: "wamid.inbound",
-      channel: Address.group("120363000000000000"),
-      from: Address.pn("15557654321"),
-      to: Address.group("120363000000000000"),
-      from_me: false,
-      pushname: "Alice",
-      timestamp: 1_706_745_600,
-      type: :text,
-      content: "hello",
-      raw: %Proto.Message{}
-    }
+    incoming_message =
+      message(
+        id: "wamid.inbound",
+        channel: Address.group("120363000000000000"),
+        from: Address.pn("15557654321"),
+        to: Address.group("120363000000000000"),
+        from_me: false,
+        pushname: "Alice",
+        timestamp: 1_706_745_600
+      )
 
     send(
       parent,

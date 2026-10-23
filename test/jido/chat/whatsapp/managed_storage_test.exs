@@ -1,8 +1,16 @@
 defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: false
 
   alias Jido.Chat.WhatsApp.Storage.Mnesia
   alias Jido.Chat.WhatsApp.ConnectionWorker
+
+  defmodule FailingTransport do
+    def connect(config, _) do
+      send(config.observer, {:connect_attempt, config.profile})
+      {:error, :connection_failed}
+    end
+  end
 
   setup do
     start_supervised!({Mnesia, max_value_bytes: 64, max_scope_bytes: 200})
@@ -82,6 +90,83 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
     assert Process.alive?(managed)
   end
 
+  test "logged-out listener stays logged out when a sibling recovers from storage replacement" do
+    managed = worker(:logged_out, {Mnesia, scope: :logged_out})
+    sibling = worker(:sibling, {Mnesia, scope: :sibling})
+    assert_receive {:connected, "logged_out", _}
+    assert_receive {:connected, "sibling", old_sibling_connection}
+
+    assert :ok = ConnectionWorker.logout(managed)
+    assert %{status: :logged_out} = ConnectionWorker.status(managed)
+    {:monitors, monitors} = Process.info(Process.whereis(Mnesia), :monitors)
+    refute {:process, managed} in monitors
+
+    stop_supervised!(Mnesia)
+    start_supervised!({Mnesia, max_value_bytes: 64, max_scope_bytes: 200})
+
+    assert_receive {:connected, "sibling", new_sibling_connection}, 1_000
+    refute new_sibling_connection == old_sibling_connection
+    assert Process.alive?(sibling)
+    refute_receive {:connected, "logged_out", _}, 250
+    assert %{status: :logged_out} = ConnectionWorker.status(managed)
+
+    assert :ok = ConnectionWorker.reconnect(managed)
+    assert_receive {:connected, "logged_out", _}
+    {:monitors, monitors} = Process.info(Process.whereis(Mnesia), :monitors)
+    assert {:process, managed} in monitors
+
+    stop_supervised!(Mnesia)
+    start_supervised!({Mnesia, max_value_bytes: 64, max_scope_bytes: 200})
+    assert_receive {:connected, "logged_out", _}, 1_000
+  end
+
+  test "explicit reconnect after logout waits for unavailable storage" do
+    managed = worker(:resume, {Mnesia, scope: :resume})
+    assert_receive {:connected, "resume", _}
+    assert :ok = ConnectionWorker.logout(managed)
+    stop_supervised!(Mnesia)
+
+    assert {:error, :storage_unavailable} = ConnectionWorker.reconnect(managed)
+    refute_receive {:connected, "resume", _}, 250
+
+    start_supervised!({Mnesia, max_value_bytes: 64, max_scope_bytes: 200})
+    assert_receive {:connected, "resume", _}, 1_000
+  end
+
+  test "watch and unwatch are idempotent and permit resubscription" do
+    owner = Process.whereis(Mnesia)
+    assert {:ok, token} = Mnesia.watch()
+    assert {:ok, ^token} = Mnesia.watch()
+    {:monitors, monitors} = Process.info(owner, :monitors)
+    assert Enum.count(monitors, &(&1 == {:process, self()})) == 1
+
+    assert :ok = Mnesia.unwatch()
+    assert :ok = Mnesia.unwatch()
+    {:monitors, monitors} = Process.info(owner, :monitors)
+    refute {:process, self()} in monitors
+
+    assert {:ok, ^token} = Mnesia.watch()
+    {:monitors, monitors} = Process.info(owner, :monitors)
+    assert Enum.count(monitors, &(&1 == {:process, self()})) == 1
+  end
+
+  test "failed storage recovery attempts retain at most one subscription per worker" do
+    stop_supervised!(Mnesia)
+    managed = worker(:failing, {Mnesia, scope: :failing}, FailingTransport)
+    assert %{status: :failed} = ConnectionWorker.status(managed)
+
+    storage = start_supervised!({Mnesia, max_value_bytes: 64, max_scope_bytes: 200})
+
+    for _ <- 1..6 do
+      assert_receive {:connect_attempt, "failing"}, 1_000
+    end
+
+    assert Process.alive?(managed)
+    {:monitors, monitors} = Process.info(storage, :monitors)
+    subscriptions = Enum.count(monitors, &(&1 == {:process, managed}))
+    assert subscriptions <= 1
+  end
+
   test "literal match-pattern atoms cannot clear another host scope" do
     first = Mnesia.new(scope: :_)
     other = Mnesia.new(scope: :other)
@@ -105,7 +190,6 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
   test "strict RAM policy rejects host disk schema while coexistence preserves host data" do
     directory = Path.join(System.tmp_dir!(), "whatsapp-schema-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(directory) end)
-    ebin = Application.app_dir(:jido_chat_whatsapp, "ebin")
 
     script = """
     Process.flag(:trap_exit, true)
@@ -127,7 +211,7 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
     IO.puts("HOST_SCHEMA_PRESERVED")
     """
 
-    {output, status} = System.cmd("elixir", ["--erl", "+S 2:2", "-pa", ebin, "-e", script], stderr_to_stdout: true)
+    {output, status} = fresh_vm(script, [], paths: [Application.app_dir(:jido_chat_whatsapp, "ebin")])
     assert status == 0, output
     assert output =~ "HOST_SCHEMA_PRESERVED"
   end
@@ -141,13 +225,14 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
     do: send(observer, {:lifecycle, payload})
 
   def stop(_, _), do: :ok
+  def logout(_, _), do: :ok
   def sink(_, _), do: :ok
 
-  defp worker(id, storage) do
+  defp worker(id, storage, transport \\ __MODULE__) do
     start_supervised!(
       {ConnectionWorker,
        bridge_id: to_string(id),
-       transport: __MODULE__,
+       transport: transport,
        sink_mfa: {__MODULE__, :lifecycle, [self()]},
        config: %{profile: to_string(id), storage: storage, observer: self()}},
       id: id,

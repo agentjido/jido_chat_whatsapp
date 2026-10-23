@@ -1,5 +1,7 @@
 defmodule Jido.Chat.WhatsApp.HistoryContractTest do
   use ExUnit.Case, async: true
+  import Jido.Chat.WhatsApp.TestHelpers
+
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
 
   defmodule Transport do
@@ -12,10 +14,6 @@ defmodule Jido.Chat.WhatsApp.HistoryContractTest do
     def account_jids(_), do: {:ok, ["123@s.whatsapp.net"]}
   end
 
-  defmodule Sink do
-    def emit(pid, payload, _opts), do: send(pid, {:payload, payload})
-  end
-
   for history <- [false, true], full <- [false, true] do
     test "history=#{history} full=#{full} survive reconnect and preserve queued messages" do
       history = unquote(history)
@@ -23,7 +21,7 @@ defmodule Jido.Chat.WhatsApp.HistoryContractTest do
 
       {:ok, [spec]} =
         Adapter.listener_child_specs("history",
-          sink_mfa: {Sink, :emit, [self()]},
+          sink_mfa: sink(:payload),
           ingress: %{
             "mode" => "linked_device",
             "profile" => "profile",
@@ -39,15 +37,14 @@ defmodule Jido.Chat.WhatsApp.HistoryContractTest do
       assert config.sync_history == history
       assert config.sync_full_history == full
 
-      msg = %Amarula.Msg{
-        id: "queued",
-        channel: Amarula.Address.pn("456"),
-        from_me: true,
-        type: :text,
-        content: "old but queued",
-        timestamp: 1,
-        raw: %Amarula.Protocol.Proto.Message{}
-      }
+      msg =
+        message(
+          id: "queued",
+          channel: Amarula.Address.pn("456"),
+          from_me: true,
+          content: "old but queued",
+          timestamp: 1
+        )
 
       send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
       assert_receive {:payload, %{id: "queued"} = payload}

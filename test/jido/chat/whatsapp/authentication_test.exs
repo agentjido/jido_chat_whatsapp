@@ -1,5 +1,6 @@
 defmodule Jido.Chat.WhatsApp.AuthenticationTest do
   use ExUnit.Case, async: false
+  import Jido.Chat.WhatsApp.TestHelpers
   alias Jido.Chat.Adapter, as: Core
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
   alias Jido.Chat.WhatsApp.Storage.Mnesia
@@ -62,14 +63,12 @@ defmodule Jido.Chat.WhatsApp.AuthenticationTest do
     assert Agent.get(c.host, & &1.requests) == []
     refute_received {:connection, _, _}
 
-    message = %Amarula.Msg{
-      id: "ordinary",
-      channel: Amarula.Address.pn("123"),
-      from: Amarula.Address.pn("456"),
-      type: :text,
-      content: "hello",
-      raw: %Amarula.Protocol.Proto.Message{}
-    }
+    message =
+      message(
+        id: "ordinary",
+        channel: Amarula.Address.pn("123"),
+        from: Amarula.Address.pn("456")
+      )
 
     event(session, :messages_upsert, %{messages: [message]})
     refute_received {:message, _}
@@ -327,17 +326,6 @@ defmodule Jido.Chat.WhatsApp.AuthenticationTest do
     await_phase(session, :authenticated, "+15550001")
   end
 
-  defp await_phase(session, phase, id, remaining \\ 100)
-  defp await_phase(_, _, _, 0), do: flunk("authentication did not settle")
-
-  defp await_phase(session, phase, id, remaining) do
-    case command(session, :status) do
-      {:ok, %{phase: ^phase, account: %{external_id: ^id}}} ->
-        :ok
-
-      _ ->
-        Process.sleep(5)
-        await_phase(session, phase, id, remaining - 1)
-    end
-  end
+  defp await_phase(session, phase, id),
+    do: eventually(fn -> match?({:ok, %{phase: ^phase, account: %{external_id: ^id}}}, command(session, :status)) end)
 end

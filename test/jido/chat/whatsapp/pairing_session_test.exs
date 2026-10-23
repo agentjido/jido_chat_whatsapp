@@ -1,5 +1,6 @@
 defmodule Jido.Chat.WhatsApp.PairingSessionTest do
   use ExUnit.Case, async: false
+  import Jido.Chat.WhatsApp.TestHelpers
   alias Jido.Chat.WhatsApp.PairingSession
   alias Jido.Chat.WhatsApp.Storage.{Mnesia, Split, Temporary}
 
@@ -154,17 +155,7 @@ defmodule Jido.Chat.WhatsApp.PairingSessionTest do
     do: [scope: host, profile: "saved", context: host, sink_mfa: {__MODULE__, :host_request, []}]
 
   defp command(pid, op, owner \\ :operator), do: PairingSession.execute(%{op: op, session: pid}, owner, [])
-  defp assert_confirmable(pid, tries \\ 100)
-  defp assert_confirmable(_, 0), do: flunk("identity never became available")
 
-  defp assert_confirmable(pid, tries) do
-    case command(pid, :status) do
-      {:ok, %{phase: :confirm}} ->
-        :ok
-
-      _ ->
-        Process.sleep(5)
-        assert_confirmable(pid, tries - 1)
-    end
-  end
+  defp assert_confirmable(pid),
+    do: eventually(fn -> match?({:ok, %{phase: :confirm}}, command(pid, :status)) end)
 end

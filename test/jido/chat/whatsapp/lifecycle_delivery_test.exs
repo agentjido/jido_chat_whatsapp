@@ -1,6 +1,7 @@
 defmodule Jido.Chat.WhatsApp.LifecycleDeliveryTest do
   use ExUnit.Case, async: true
 
+  import Jido.Chat.WhatsApp.TestHelpers
   alias Jido.Chat
   alias Jido.Chat.{ActionEvent, EventEnvelope}
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
@@ -75,13 +76,13 @@ defmodule Jido.Chat.WhatsApp.LifecycleDeliveryTest do
   end
 
   defp listener(host, profile) do
-    {:ok, [spec]} =
-      Adapter.listener_child_specs(profile,
-        ingress: %{mode: :linked_device, profile: profile, transport: Transport, config: %{observer: self()}},
+    worker =
+      start_listener(
+        profile,
+        %{mode: :linked_device, profile: profile, transport: Transport, config: %{observer: self()}},
         sink_mfa: {__MODULE__, :emit, [self(), host]}
       )
 
-    worker = start_supervised!(spec)
     assert_receive {:connection, ^profile, relay}
     {worker, relay}
   end

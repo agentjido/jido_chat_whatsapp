@@ -1,4 +1,5 @@
 defmodule Jido.Chat.WhatsApp.MnesiaContractTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: false
   use ExUnitProperties
 
@@ -100,7 +101,6 @@ defmodule Jido.Chat.WhatsApp.MnesiaContractTest do
   test "an unavailable store fails closed and Mnesia restart loses state without writing files" do
     directory = Path.join(System.tmp_dir!(), "zaq-mnesia-#{Base.encode16(:crypto.strong_rand_bytes(16))}")
     on_exit(fn -> File.rm_rf!(directory) end)
-    ebin = Application.app_dir(:jido_chat_whatsapp, "ebin")
 
     script = """
     alias Jido.Chat.WhatsApp.Storage.Mnesia, as: Store
@@ -135,8 +135,7 @@ defmodule Jido.Chat.WhatsApp.MnesiaContractTest do
     IO.puts("RAM_RESTART_OK")
     """
 
-    {output, status} =
-      System.cmd("elixir", ["--erl", "+S 2:2", "-pa", ebin, "-e", script], stderr_to_stdout: true)
+    {output, status} = fresh_vm(script, [], paths: [Application.app_dir(:jido_chat_whatsapp, "ebin")])
 
     assert status == 0, output
     assert output =~ "RAM_RESTART_OK"

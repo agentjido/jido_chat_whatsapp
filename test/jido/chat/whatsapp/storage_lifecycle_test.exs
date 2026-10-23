@@ -1,43 +1,9 @@
 defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
   use Jido.Chat.WhatsApp.RuntimeCase, async: false
+  import Jido.Chat.WhatsApp.TestHelpers
+
+  alias Jido.Chat.WhatsApp.TestStorage, as: Store
   alias Jido.Chat.WhatsApp.Transport.{AmarulaClient, GuardedStorage}
-
-  defmodule Store do
-    def new(opts), do: Keyword.fetch!(opts, :table)
-
-    def get(table, profile, namespace, key) do
-      if :ets.member(table, :fail_second_read) and :ets.update_counter(table, :reads, 1, {:reads, 0}) > 1,
-        do: raise("private read failure")
-
-      case :ets.lookup(table, {profile, namespace, key}) do
-        [{_, value}] -> value
-        [] -> :error
-      end
-    end
-
-    def put(table, profile, namespace, key, value) do
-      if :ets.member(table, :fail_write) do
-        {:error, "private details"}
-      else
-        :ets.insert(table, {{profile, namespace, key}, {:ok, value}})
-        :ok
-      end
-    end
-
-    def delete(table, profile, namespace, key) do
-      :ets.delete(table, {profile, namespace, key})
-      :ok
-    end
-
-    def clear(table, profile) do
-      if :ets.member(table, :fail_clear), do: throw(:failure)
-      :ets.match_delete(table, {{profile, :_, :_}, :_})
-      :ok
-    end
-
-    def list_keys(_, _, _), do: {:ok, []}
-    def list_profiles(_), do: {:ok, []}
-  end
 
   setup do
     table = :ets.new(:storage, [:public, :set])
@@ -210,11 +176,6 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     refute Process.alive?(replacement)
   end
 
-  defmodule Sink do
-    def emit(pid, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: event}}, _opts),
-      do: send(pid, {:event, event})
-  end
-
   test "worker recovers sanitized identity from stored authentication without a new QR", %{
     config: config,
     table: table,
@@ -226,11 +187,9 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     :ok = Store.put(table, profile, :creds, :self, Map.put(creds, :me, %{id: "123:5@s.whatsapp.net", name: "Known"}))
 
     worker =
-      start_supervised!(
-        {ConnectionWorker,
-         bridge_id: "restored",
-         config: Map.merge(config, %{sync_history: false, sync_full_history: false}),
-         sink_mfa: {Sink, :emit, [self()]}}
+      start_worker(Map.merge(config, %{sync_history: false, sync_full_history: false}),
+        bridge_id: "restored",
+        sink_mfa: lifecycle_sink(:event)
       )
 
     send(:sys.get_state(worker).relay, {:amarula, :connection_update, %{connection: :open}})
@@ -245,7 +204,7 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     alias Jido.Chat.WhatsApp.ConnectionWorker
 
     worker =
-      start_supervised!({ConnectionWorker, bridge_id: "bridge", config: config, sink_mfa: {Sink, :emit, [self()]}})
+      start_worker(config, bridge_id: "bridge", sink_mfa: lifecycle_sink(:event))
 
     state = :sys.get_state(worker)
     scope = Amarula.Connection.get_conn(state.conn).storage
@@ -263,7 +222,7 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     alias Jido.Chat.WhatsApp.ConnectionWorker
 
     worker =
-      start_supervised!({ConnectionWorker, bridge_id: "bridge", config: config, sink_mfa: {Sink, :emit, [self()]}})
+      start_worker(config, bridge_id: "bridge", sink_mfa: lifecycle_sink(:event))
 
     old = :sys.get_state(worker)
     assert :ok = ConnectionWorker.reconnect(worker)
@@ -281,7 +240,7 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     alias Jido.Chat.WhatsApp.ConnectionWorker
 
     worker =
-      start_supervised!({ConnectionWorker, bridge_id: "logout", config: config, sink_mfa: {Sink, :emit, [self()]}})
+      start_worker(config, bridge_id: "logout", sink_mfa: lifecycle_sink(:event))
 
     :ets.insert(table, {:fail_clear, true})
     assert {:error, :logout_failed} = ConnectionWorker.logout(worker)
@@ -307,13 +266,7 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
         :ok = Store.put(table, profile, :session, "key", suffix)
 
         worker =
-          start_supervised!(
-            Supervisor.child_spec(
-              {ConnectionWorker,
-               bridge_id: suffix, config: %{config | profile: profile}, sink_mfa: {Sink, :emit, [self()]}},
-              id: suffix
-            )
-          )
+          start_worker(%{config | profile: profile}, bridge_id: suffix, sink_mfa: lifecycle_sink(:event), id: suffix)
 
         send(:sys.get_state(worker).relay, {:amarula, :connection_update, %{connection: :open}})
         assert_receive {:event, %{status: :connected, profile: ^profile}}
@@ -345,9 +298,7 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
 
     worker =
-      start_supervised!(
-        {ConnectionWorker, bridge_id: "adapter-logout", config: config, sink_mfa: {Sink, :emit, [self()]}}
-      )
+      start_worker(config, bridge_id: "adapter-logout", sink_mfa: lifecycle_sink(:event))
 
     :ok = Store.put(table, config.profile, :session, "key", "saved")
     :ets.insert(table, {:fail_clear, true})
@@ -378,16 +329,13 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
   end
 
   defp await_replacement(conn, old, retries) do
-    case GenServer.whereis(conn) do
-      pid when is_pid(pid) and pid != old ->
-        pid
-
-      _ when retries > 0 ->
-        Process.sleep(10)
-        await_replacement(conn, old, retries - 1)
-
-      _ ->
-        flunk("protocol restart did not register")
-    end
+    eventually(
+      fn ->
+        pid = GenServer.whereis(conn)
+        if is_pid(pid) and pid != old, do: pid
+      end,
+      retries + 1,
+      10
+    )
   end
 end

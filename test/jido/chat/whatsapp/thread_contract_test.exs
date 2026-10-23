@@ -1,9 +1,9 @@
 defmodule Jido.Chat.WhatsApp.ThreadContractTest do
+  import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias Amarula.{Address, Msg}
-  alias Amarula.Protocol.Proto
+  alias Amarula.Address
   alias Jido.Chat.WebhookRequest
   alias Jido.Chat.WhatsApp.{Adapter, Message}
 
@@ -25,15 +25,14 @@ defmodule Jido.Chat.WhatsApp.ThreadContractTest do
   end
 
   test "Amarula payloads and string-keyed references use the immediate target" do
-    message = %Msg{
-      id: "reply",
-      channel: Address.group("123"),
-      from: Address.pn("456"),
-      type: :text,
-      content: "Question",
-      quoted: %{id: "root", channel: Address.group("123"), from: Address.pn("789")},
-      raw: %Proto.Message{}
-    }
+    message =
+      message(
+        id: "reply",
+        channel: Address.group("123"),
+        from: Address.pn("456"),
+        content: "Question",
+        quoted: %{id: "root", channel: Address.group("123"), from: Address.pn("789")}
+      )
 
     assert {:ok, attrs} = Message.incoming_attrs(message)
     assert attrs.external_thread_id == "root"

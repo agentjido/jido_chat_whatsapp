@@ -79,6 +79,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         storage_token: nil,
         storage_monitor: nil,
         storage_retry: nil,
+        storage_retry_timer: nil,
         config: config,
         connect_opts: Keyword.get(opts, :connect_opts, []),
         profile: config[:profile] || config["profile"],
@@ -129,12 +130,34 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   def handle_call(:reconnect, _from, state) do
     state = clear_identity(state)
 
-    with :ok <- stop_connection(state),
-         {:ok, next} <-
-           connect(%{clear_qr(state) | attempt_id: make_ref(), qr_count: 0, status: :connecting, conn: nil}) do
-      notify(next, :connecting)
-      {:reply, :ok, next}
-    else
+    case stop_connection(state) do
+      :ok ->
+        state = %{
+          (state
+           |> clear_qr()
+           |> release_storage())
+          | attempt_id: make_ref(),
+            qr_count: 0,
+            status: :connecting,
+            conn: nil,
+            relay: nil,
+            relay_monitor: nil
+        }
+
+        case connect_with_storage(state) do
+          {:ok, %{storage_retry: ref} = next} when is_reference(ref) ->
+            {:reply, {:error, :storage_unavailable}, next}
+
+          {:ok, next} ->
+            notify(next, :connecting)
+            {:reply, :ok, next}
+
+          _ ->
+            next = %{state | status: :failed}
+            notify(next, :error)
+            {:reply, {:error, :connection_failed}, next}
+        end
+
       _ ->
         state = %{clear_qr(state) | status: :failed}
         notify(state, :error)
@@ -152,8 +175,18 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
       case state.transport.logout(state.conn, state.connect_opts) do
         :ok ->
           if state.relay_monitor, do: Process.demonitor(state.relay_monitor, [:flush])
-          send(state.relay, :stop)
-          next = %{clear_qr(state) | conn: nil, status: :logged_out}
+          if state.relay, do: send(state.relay, :stop)
+
+          next = %{
+            (state
+             |> clear_qr()
+             |> release_storage())
+            | conn: nil,
+              relay: nil,
+              relay_monitor: nil,
+              status: :logged_out
+          }
+
           notify(next, :logged_out)
           {:reply, :ok, next}
 
@@ -251,7 +284,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     do: {:noreply, wait_for_storage(state)}
 
   def handle_info({:retry_storage, token}, %{storage_retry: token} = state) do
-    case connect_with_storage(%{state | storage_retry: nil}) do
+    case connect_with_storage(%{state | storage_retry: nil, storage_retry_timer: nil}) do
       {:ok, next} -> {:noreply, next}
       {:stop, _} -> {:noreply, wait_for_storage(state)}
     end
@@ -271,7 +304,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
             result
 
           error ->
-            if monitor, do: Process.demonitor(monitor, [:flush])
+            release_storage(next)
             error
         end
 
@@ -285,12 +318,12 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
   defp wait_for_storage(state) do
     stop_connection(state)
-    if state.storage_monitor, do: Process.demonitor(state.storage_monitor, [:flush])
 
     next = %{
       (state
        |> clear_qr()
-       |> clear_identity())
+       |> clear_identity()
+       |> release_storage())
       | storage_token: nil,
         storage_monitor: nil,
         conn: nil,
@@ -305,9 +338,18 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp schedule_storage_retry(state) do
+    if state.storage_retry_timer, do: Process.cancel_timer(state.storage_retry_timer)
     token = make_ref()
-    Process.send_after(self(), {:retry_storage, token}, @storage_retry_interval)
-    %{state | storage_retry: token}
+    timer = Process.send_after(self(), {:retry_storage, token}, @storage_retry_interval)
+    %{state | storage_retry: token, storage_retry_timer: timer}
+  end
+
+  defp release_storage(state) do
+    if state.storage_token, do: Jido.Chat.WhatsApp.Storage.Mnesia.unwatch()
+    if state.storage_monitor, do: Process.demonitor(state.storage_monitor, [:flush])
+    if state.storage_retry_timer, do: Process.cancel_timer(state.storage_retry_timer)
+
+    %{state | storage_token: nil, storage_monitor: nil, storage_retry: nil, storage_retry_timer: nil}
   end
 
   defp connect(state) do

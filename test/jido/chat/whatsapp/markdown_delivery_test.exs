@@ -2,34 +2,12 @@ defmodule Jido.Chat.WhatsApp.MarkdownDeliveryTest do
   use ExUnit.Case, async: true
 
   alias Jido.Chat.FileUpload
+  alias Jido.Chat.WhatsApp.TestTransport, as: Transport
   alias Jido.Chat.WhatsApp.{Adapter, SendOptions}
 
   @jid "15551234567@s.whatsapp.net"
   @source "**Ready**: *review* the ~~old~~ value. Keep `**literal**` unchanged."
   @rendered "*Ready*: _review_ the ~old~ value. Keep `**literal**` unchanged."
-
-  defmodule Transport do
-    @moduledoc false
-    def resolve_conn(opts) do
-      send(self(), {:resolve_conn, opts})
-      {:ok, Keyword.get(opts, :conn, self())}
-    end
-
-    def send_text(conn, jid, text, opts) do
-      send(self(), {:text, conn, jid, text, opts})
-      {:ok, "reply-1"}
-    end
-
-    def send_edit(conn, key, text) do
-      send(self(), {:edit, conn, key, text})
-      {:ok, "status-1"}
-    end
-
-    def send_media(conn, jid, kind, data, opts) do
-      send(self(), {:media, conn, jid, kind, data, opts})
-      {:ok, "media-1"}
-    end
-  end
 
   defmodule FailingTransport do
     @moduledoc false
@@ -56,11 +34,11 @@ defmodule Jido.Chat.WhatsApp.MarkdownDeliveryTest do
       ]
 
       assert {:ok, response} = Adapter.send_message("15551234567", @source, opts)
-      assert response.external_message_id == "reply-1"
+      assert response.external_message_id == "wamid.text"
       assert response.external_room_id == @jid
       assert response.status == :sent
       assert_received {:resolve_conn, [profile: "profile", conn: :selected]}
-      assert_received {:text, :selected, @jid, @rendered, transport_opts}
+      assert_received {:send_text, :selected, @jid, @rendered, transport_opts}
       assert Keyword.get(transport_opts, :quoted) == :quote
       assert Keyword.get(transport_opts, :mentions) == [@jid]
       refute Keyword.has_key?(transport_opts, :format)
@@ -70,8 +48,8 @@ defmodule Jido.Chat.WhatsApp.MarkdownDeliveryTest do
   test "status-message edits use the same rendering path and retain the target and receipt" do
     opts = %{"transport" => Transport, "conn" => :selected, "format" => "markdown"}
     assert {:ok, response} = Adapter.edit_message(@jid, "status-1", @source, opts)
-    assert_received {:edit, :selected, {@jid, "status-1", true}, @rendered}
-    assert response.external_message_id == "status-1"
+    assert_received {:send_edit, :selected, {@jid, "status-1", true}, @rendered}
+    assert response.external_message_id == "wamid.edit"
     assert response.status == :edited
     assert response.raw.edited_message_id == "status-1"
   end
@@ -87,9 +65,9 @@ defmodule Jido.Chat.WhatsApp.MarkdownDeliveryTest do
         ] do
       opts = [transport: Transport] ++ format_opts
       assert {:ok, _} = Adapter.send_message(@jid, @source, opts)
-      assert_received {:text, _, @jid, @source, _}
+      assert_received {:send_text, _, @jid, @source, _}
       assert {:ok, _} = Adapter.edit_message(@jid, "status-1", @source, opts)
-      assert_received {:edit, _, {@jid, "status-1", true}, @source}
+      assert_received {:send_edit, _, {@jid, "status-1", true}, @source}
     end
   end
 
@@ -98,8 +76,8 @@ defmodule Jido.Chat.WhatsApp.MarkdownDeliveryTest do
       upload = FileUpload.new(%{kind: :image, data: "bytes", filename: "image.png", metadata: metadata})
       opts = SendOptions.new(transport: Transport, format: :markdown, quoted: :quote, mentions: [@jid])
       assert {:ok, response} = Adapter.send_file(@jid, upload, opts)
-      assert response.external_message_id == "media-1"
-      assert_received {:media, _, @jid, :image, "bytes", media_opts}
+      assert response.external_message_id == "wamid.media"
+      assert_received {:send_media, _, @jid, :image, "bytes", media_opts}
       assert media_opts[:caption] == @rendered
       assert media_opts[:file_name] == "image.png"
       assert media_opts[:quoted] == :quote
@@ -107,11 +85,11 @@ defmodule Jido.Chat.WhatsApp.MarkdownDeliveryTest do
       refute Keyword.has_key?(media_opts, :format)
 
       assert {:ok, _} = Adapter.send_file(@jid, upload, %{opts | caption: "**Override**"})
-      assert_received {:media, _, @jid, :image, "bytes", explicit_opts}
+      assert_received {:send_media, _, @jid, :image, "bytes", explicit_opts}
       assert explicit_opts[:caption] == "*Override*"
 
       assert {:ok, _} = Adapter.send_file(@jid, upload, %{opts | caption: ""})
-      assert_received {:media, _, @jid, :image, "bytes", empty_opts}
+      assert_received {:send_media, _, @jid, :image, "bytes", empty_opts}
       assert empty_opts[:caption] == ""
     end
   end
@@ -121,12 +99,12 @@ defmodule Jido.Chat.WhatsApp.MarkdownDeliveryTest do
 
     for format_opts <- [[], [format: :plain_text], [format: :html], [format: "unknown"]] do
       assert {:ok, _} = Adapter.send_file(@jid, upload, [transport: Transport] ++ format_opts)
-      assert_received {:media, _, @jid, :document, "bytes", opts}
+      assert_received {:send_media, _, @jid, :document, "bytes", opts}
       assert opts[:caption] == @source
     end
 
     assert {:ok, _} = Adapter.send_file(@jid, %{upload | metadata: %{}}, transport: Transport, format: :markdown)
-    assert_received {:media, _, @jid, :document, "bytes", opts}
+    assert_received {:send_media, _, @jid, :document, "bytes", opts}
     refute Keyword.has_key?(opts, :caption)
   end
 

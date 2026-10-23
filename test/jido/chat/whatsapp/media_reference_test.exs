@@ -1,17 +1,12 @@
 defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
   use ExUnit.Case, async: true
+  import Jido.Chat.WhatsApp.TestHelpers
+
+  alias Jido.Chat.WhatsApp.ProtocolStub, as: Protocol
 
   alias Jido.Chat.{EventEnvelope, WebhookRequest}
-  alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
+  alias Jido.Chat.WhatsApp.Adapter
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
-
-  defmodule Protocol do
-    use GenServer
-    def start_link(state), do: GenServer.start_link(__MODULE__, state)
-    def init(state), do: {:ok, state}
-    def handle_call(:conn, _from, state), do: {:reply, %{profile: state.profile}, state}
-    def handle_call(:get_auth_creds, _from, state), do: {:reply, state.creds, state}
-  end
 
   defmodule Transport do
     def connect(config, opts) do
@@ -31,17 +26,13 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
     end
   end
 
-  defmodule Sink do
-    def emit(pid, event, _opts), do: send(pid, {:ingress, event})
-  end
-
   defmodule UnsupportedTransport do
     defdelegate resolve_conn(opts), to: AmarulaClient
   end
 
   defp protocol(profile, secret) do
     state = %{profile: profile, creds: %{signed_identity_key: %{private: secret}}}
-    start_supervised!(%{id: make_ref(), start: {Protocol, :start_link, [state]}})
+    Protocol.start_supervised!(state)
   end
 
   defp payload(kind \\ :image) do
@@ -183,25 +174,24 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
     test "linked-device ingress preserves safe facts without download secrets for #{@room}" do
       conn = protocol("one", :crypto.strong_rand_bytes(32))
 
-      start_supervised!(
-        {ConnectionWorker,
-         bridge_id: "media",
-         sink_mfa: {Sink, :emit, [self()]},
-         transport: Transport,
-         config: %{profile: "one", conn: conn, test_pid: self(), sync_history: false}}
+      start_worker(%{profile: "one", conn: conn, test_pid: self(), sync_history: false},
+        bridge_id: "media",
+        sink_mfa: sink(:ingress),
+        transport: Transport
       )
 
       assert_receive {:receiver, receiver}
 
-      message = %Amarula.Msg{
-        id: "media-1",
-        type: :media,
-        raw: %{},
-        channel: @room,
-        timestamp: 1_700_000_000,
-        from: "15550002@s.whatsapp.net",
-        content: struct!(Amarula.Content.Media, payload().content)
-      }
+      message =
+        message(
+          id: "media-1",
+          type: :media,
+          raw: %{},
+          channel: @room,
+          timestamp: 1_700_000_000,
+          from: "15550002@s.whatsapp.net",
+          content: struct!(Amarula.Content.Media, payload().content)
+        )
 
       send(receiver, {:amarula, :messages_upsert, %{messages: [message]}})
       assert_receive {:ingress, %EventEnvelope{event_type: :message, payload: incoming} = envelope}, 1_000
@@ -244,24 +234,23 @@ defmodule Jido.Chat.WhatsApp.MediaReferenceTest do
   test "failed listener sealing reports a sanitized lifecycle event and emits no media payload" do
     conn = protocol("broken", nil)
 
-    start_supervised!(
-      {ConnectionWorker,
-       bridge_id: "broken-media",
-       sink_mfa: {Sink, :emit, [self()]},
-       transport: Transport,
-       config: %{profile: "broken", conn: conn, test_pid: self()}}
+    start_worker(%{profile: "broken", conn: conn, test_pid: self()},
+      bridge_id: "broken-media",
+      sink_mfa: sink(:ingress),
+      transport: Transport
     )
 
     assert_receive {:receiver, receiver}
 
-    message = %Amarula.Msg{
-      id: "media-1",
-      type: :media,
-      raw: %{},
-      channel: "15550001@s.whatsapp.net",
-      from: "15550002@s.whatsapp.net",
-      content: struct!(Amarula.Content.Media, payload().content)
-    }
+    message =
+      message(
+        id: "media-1",
+        type: :media,
+        raw: %{},
+        channel: "15550001@s.whatsapp.net",
+        from: "15550002@s.whatsapp.net",
+        content: struct!(Amarula.Content.Media, payload().content)
+      )
 
     send(receiver, {:amarula, :messages_upsert, %{messages: [message]}})
 

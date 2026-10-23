@@ -1,16 +1,8 @@
 defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
   use ExUnit.Case, async: true
+  alias Jido.Chat.WhatsApp.ProtocolStub, as: Control
   alias Jido.Chat.WhatsApp.{ConnectionWorker, PairingSession}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
-
-  defmodule Control do
-    use GenServer
-    def start_link(owner), do: GenServer.start_link(__MODULE__, owner)
-    def init(owner), do: {:ok, %{owner: owner, connection: :disconnected, identity: {:error, :unavailable}}}
-    def handle_call(:get_connection_state, _, state), do: {:reply, state.connection, state}
-    def handle_call(:identity, _, state), do: {:reply, state.identity, state}
-    def handle_call({:set, values}, _, state), do: {:reply, :ok, Map.merge(state, values)}
-  end
 
   def connect(config, opts) do
     send(opts[:observer], {:connection, config.profile})
@@ -32,7 +24,9 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
   def unused(_, _), do: {:error, :unused}
 
   setup do
-    control = start_supervised!({Control, self()})
+    control =
+      start_supervised!({Control, %{owner: self(), connection: :disconnected, identity: {:error, :unavailable}}})
+
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
 
     {:ok, %{session: session}} =

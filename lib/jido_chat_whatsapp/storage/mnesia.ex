@@ -35,6 +35,10 @@ defmodule Jido.Chat.WhatsApp.Storage.Mnesia do
   @spec watch() :: {:ok, {pid(), reference()}} | {:error, :storage_unavailable}
   def watch, do: call(:watch)
 
+  @doc "Removes the caller's generation-loss subscription idempotently."
+  @spec unwatch() :: :ok | {:error, :storage_unavailable}
+  def unwatch, do: call(:unwatch)
+
   @doc "Checks readiness and the exact generation, including before monitor delivery."
   @spec current?(term()) :: boolean()
   def current?(token), do: ready() == {:ok, token}
@@ -102,12 +106,27 @@ defmodule Jido.Chat.WhatsApp.Storage.Mnesia do
   def handle_call(:watch, {pid, _}, state) do
     case readiness(state) do
       {:ok, _} = result ->
-        ref = Process.monitor(pid)
+        ref = Enum.find_value(state.watchers, fn {ref, watcher} -> if watcher == pid, do: ref end)
+        ref = ref || Process.monitor(pid)
         {:reply, result, %{state | watchers: Map.put(state.watchers, ref, pid)}}
 
       error ->
         {:reply, error, state}
     end
+  end
+
+  def handle_call(:unwatch, {pid, _}, state) do
+    watchers =
+      Map.reject(state.watchers, fn {ref, watcher} ->
+        if watcher == pid do
+          Process.demonitor(ref, [:flush])
+          true
+        else
+          false
+        end
+      end)
+
+    {:reply, :ok, %{state | watchers: watchers}}
   end
 
   def handle_call({:execute, generation, scope, profile, operation}, _, state) do

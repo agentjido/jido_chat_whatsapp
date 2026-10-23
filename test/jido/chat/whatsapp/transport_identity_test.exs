@@ -1,22 +1,12 @@
 defmodule Jido.Chat.WhatsApp.TransportIdentityTest do
   use ExUnit.Case, async: true
+  alias Jido.Chat.WhatsApp.ProtocolStub, as: Protocol
 
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   # Simulated external protocol endpoint; exercise the real transport boundary.
-  defmodule Protocol do
-    use GenServer
-    def start_link(state), do: GenServer.start_link(__MODULE__, state)
-    def init(state), do: {:ok, state}
 
-    def handle_call(:get_connection_state, _from, state),
-      do: {:reply, Map.get(state, :connection, :connected), state}
-
-    def handle_call(:get_auth_creds, _from, %{blocked: true} = state), do: {:noreply, state}
-    def handle_call(:get_auth_creds, _from, state), do: {:reply, state.creds, state}
-  end
-
-  defp protocol(state), do: start_supervised!(%{id: make_ref(), start: {Protocol, :start_link, [state]}})
+  defp protocol(state), do: Protocol.start_supervised!(state)
 
   test "authenticated PN and LID normalize through the real boundary with only public fields" do
     conn =
