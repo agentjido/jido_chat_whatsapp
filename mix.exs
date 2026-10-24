@@ -58,7 +58,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
 
   defp deps do
     [
-      {:jido_chat, git: "https://github.com/jat10/jido_chat.git", branch: "feat/shared-pairing-capability"},
+      {:jido_chat, git: "https://github.com/agentjido/jido_chat.git", branch: "main"},
       {:amarula, "~> 0.5.10"},
       {:earmark_parser, "~> 1.4.46"},
       {:protobuf, "~> 0.17.0", override: true},
