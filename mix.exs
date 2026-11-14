@@ -2,7 +2,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @jido_chat_ref "0b6f16d9b91b37c61f2ad913dcdd4adea1713f88"
+  @jido_chat_ref "7652b6d74c4fc8170149ae1cfd08f981cfb1ea27"
   @source_url "https://github.com/agentjido/jido_chat_whatsapp"
   @description "WhatsApp linked-device adapter package for Jido.Chat"
 
@@ -57,16 +57,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
   defp elixirc_paths(_), do: ["lib"]
 
   defp chat_dependency do
-    case {Mix.env(), System.get_env("JIDO_CHAT_PATH")} do
-      {env, path} when env in [:dev, :test] and is_binary(path) and path != "" ->
-        {:jido_chat, path: Path.expand(path, __DIR__), override: true}
-
-      {env, _path} when env in [:dev, :test] ->
-        {:jido_chat, github: "agentjido/jido_chat", ref: @jido_chat_ref, override: true}
-
-      _ ->
-        {:jido_chat, "~> 3.0.0-dev"}
-    end
+    {:jido_chat, github: "agentjido/jido_chat", ref: @jido_chat_ref}
   end
 
   defp deps do
@@ -74,8 +65,8 @@ defmodule Jido.Chat.WhatsApp.MixProject do
       chat_dependency(),
       {:amarula, "~> 0.5.0"},
       {:protobuf, "~> 0.17.0"},
-      {:zoi, "~> 0.18.11"},
-      {:dotenvy, "~> 1.1", only: [:test]},
+      {:zoi, "~> 0.19.0"},
+      {:dotenvy, "~> 1.2"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.21", only: [:dev, :test], runtime: false},
