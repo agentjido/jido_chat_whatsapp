@@ -17,8 +17,8 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
 
   alias Amarula.Protocol.Auth.QRCodeGenerator
   alias Amarula.Protocol.Socket.ConnectionSupervisor
-  alias Jido.Chat.WhatsApp.Transport.{GuardedStorage, MediaReference}
   alias Jido.Chat.WhatsApp.{AccountIdentity, Message}
+  alias Jido.Chat.WhatsApp.Transport.{GuardedStorage, MediaReference}
 
   @identity_call_timeout 1_000
 
@@ -436,9 +436,5 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClient do
     RuntimeError -> {:error, :connection_not_running}
   end
 
-  defp configured_profile(opts) do
-    Keyword.get(opts, :profile) ||
-      Application.get_env(:jido_chat_whatsapp, :profile) ||
-      Application.get_env(:jido_chat_whatsapp, :whatsapp_profile)
-  end
+  defp configured_profile(opts), do: Keyword.get(opts, :profile)
 end

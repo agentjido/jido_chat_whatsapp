@@ -71,18 +71,7 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaRuntime do
   end
 
   defp current_generation do
-    if Application.get_env(:jido_chat_whatsapp, :start_runtime, true) do
-      GenServer.call(RuntimeHealth, :ready, 100)
-    else
-      # Explicit compatibility mode: the host retains infrastructure recovery.
-      with pid when is_pid(pid) <- Process.whereis(Amarula.Supervisor),
-           children <- Supervisor.which_children(pid),
-           true <- Enum.all?(children, fn {_, child, _, _} -> is_pid(child) and Process.alive?(child) end) do
-        {:ok, pid}
-      else
-        _ -> :unavailable
-      end
-    end
+    GenServer.call(RuntimeHealth, :ready, 100)
   catch
     :exit, _ -> :unavailable
   end

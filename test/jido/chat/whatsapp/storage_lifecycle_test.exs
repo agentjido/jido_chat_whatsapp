@@ -55,8 +55,6 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     config: config,
     table: table
   } do
-    alias Jido.Chat.WhatsApp.Adapter
-
     # A paired device has persisted credentials before it receives media.
     :ok = Store.put(table, config.profile, :creds, :self, Amarula.Protocol.Auth.AuthUtils.init_auth_creds())
 
@@ -70,8 +68,17 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
 
     assert {:ok, conn} = AmarulaClient.connect(config, [])
     stored = :ets.tab2list(table)
-    assert {:ok, incoming} = Adapter.transform_incoming(payload, profile: config.profile)
-    reference = hd(incoming.media).url
+
+    client =
+      Jido.Chat.Client.new!(Jido.Chat.WhatsApp.Adapter,
+        id: "storage-media",
+        config: [profile: config.profile],
+        transport: AmarulaClient
+      )
+
+    assert {:ok, delivery} = Jido.Chat.normalize(client, payload, profile: config.profile)
+    [signal] = delivery.signals
+    reference = hd(signal.data["media"])["resource_ref"]["id"]
     assert :ets.tab2list(table) == stored
     assert :ok = AmarulaClient.stop(conn, [])
     assert {:ok, restored} = AmarulaClient.connect(config, [])
@@ -256,7 +263,7 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
     config: config,
     table: table
   } do
-    alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
+    alias Jido.Chat.WhatsApp.ConnectionWorker
 
     workers =
       for suffix <- ["selected", "sibling"] do
@@ -275,7 +282,7 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
 
     [{selected, profile, _}, {sibling, sibling_profile, sibling_creds}] = workers
     sibling_conn = Amarula.whereis(sibling_profile)
-    assert :ok = Adapter.logout(selected)
+    assert :ok = ConnectionWorker.logout(selected)
     assert_receive {:event, %{status: :logged_out, profile: ^profile}}
     assert ConnectionWorker.status(selected).status == :logged_out
     assert :error = Store.get(table, profile, :creds, :self)
@@ -295,21 +302,21 @@ defmodule Jido.Chat.WhatsApp.StorageLifecycleTest do
 
   @tag capture_log: true
   test "adapter logout surfaces cleanup failure and allows explicit recovery", %{config: config, table: table} do
-    alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
+    alias Jido.Chat.WhatsApp.ConnectionWorker
 
     worker =
       start_worker(config, bridge_id: "adapter-logout", sink_mfa: lifecycle_sink(:event))
 
     :ok = Store.put(table, config.profile, :session, "key", "saved")
     :ets.insert(table, {:fail_clear, true})
-    assert {:error, :logout_failed} = Adapter.logout(worker)
+    assert {:error, :logout_failed} = ConnectionWorker.logout(worker)
     assert {:ok, "saved"} = Store.get(table, config.profile, :session, "key")
     refute_receive {:event, %{status: :logged_out}}
     refute ConnectionWorker.status(worker).status == :logged_out
 
     :ets.delete(table, :fail_clear)
     assert :ok = ConnectionWorker.reconnect(worker)
-    assert :ok = Adapter.logout(worker)
+    assert :ok = ConnectionWorker.logout(worker)
     assert_receive {:event, %{status: :logged_out}}
     assert :error = Store.get(table, config.profile, :session, "key")
   end

@@ -10,7 +10,7 @@ defmodule Jido.Chat.WhatsApp.Storage.Split do
   progress. Only trusted host code may construct these options.
 
   `:volatile_namespaces` defaults to session and sender_key. Durable values
-  retain Base64-encoded uncompressed Erlang terms for compatible host storage.
+  retain Base64-encoded uncompressed Erlang terms for host storage.
   The host owns encryption/transactions; this module owns routing and encoding.
 
   Shared authentication uses `binding_options/2` to translate opaque host bindings

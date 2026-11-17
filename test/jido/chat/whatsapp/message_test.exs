@@ -3,7 +3,6 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
   use ExUnit.Case, async: true
 
   alias Amarula.Address
-  alias Jido.Chat.ReactionEvent
   alias Jido.Chat.WhatsApp.Message
 
   test "address_to_jid/1 handles common address shapes" do
@@ -140,7 +139,7 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
   end
 
   test "reaction_event/1 supports map and tuple keys" do
-    assert {:ok, %ReactionEvent{} = reaction} =
+    assert {:ok, reaction} =
              Message.reaction_event(%{
                channel_jid: "15551234567@s.whatsapp.net",
                from_jid: "15557654321@s.whatsapp.net",
@@ -151,7 +150,7 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
     assert reaction.message_id == "target-1"
     assert reaction.added == true
 
-    assert {:ok, %ReactionEvent{} = removed} =
+    assert {:ok, removed} =
              Message.reaction_event(%{
                channel_jid: "15551234567@s.whatsapp.net",
                from_jid: "15557654321@s.whatsapp.net",
@@ -162,7 +161,7 @@ defmodule Jido.Chat.WhatsApp.MessageTest do
     assert removed.message_id == "target-2"
     assert removed.added == false
 
-    assert {:ok, %ReactionEvent{} = string_key} =
+    assert {:ok, string_key} =
              Message.reaction_event(%{
                "channel_jid" => "15551234567@s.whatsapp.net",
                "type" => "reaction",

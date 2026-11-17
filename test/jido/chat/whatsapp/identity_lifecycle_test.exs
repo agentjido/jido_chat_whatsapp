@@ -2,6 +2,7 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
   use ExUnit.Case, async: true
 
   import Jido.Chat.WhatsApp.TestHelpers
+  alias Jido.Chat.Client
   alias Jido.Chat.WhatsApp.{Adapter, ConnectionWorker}
 
   defmodule Transport do
@@ -44,21 +45,23 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
     end
   end
 
-  defmodule LegacyTransport do
+  defmodule MinimalTransport do
     defdelegate connect(config, opts), to: Transport
     defdelegate stop(conn, opts), to: Transport
   end
 
   defmodule Sink do
-    def emit(test_pid, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: payload}}, _opts),
+    def emit(test_pid, payload, _opts),
       do: send(test_pid, {:lifecycle, payload})
 
-    def emit(test_pid, payload, opts), do: chat(test_pid, payload, opts)
-    def chat(test_pid, payload, _opts), do: send(test_pid, {:chat, payload})
+    def chat(test_pid, payload, _opts) do
+      send(test_pid, {:chat, payload})
+      :ok
+    end
   end
 
   defmodule ReentrantSink do
-    def emit(test_pid, session, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: payload}}, _opts) do
+    def emit(test_pid, session, payload, _opts) do
       worker = Agent.get(session, &Map.get(&1, :worker))
       if worker, do: send(test_pid, {:sink_snapshot, ConnectionWorker.status(worker)})
       send(test_pid, {:lifecycle, payload})
@@ -84,19 +87,31 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
     profile = "identity_#{System.unique_integer([:positive])}"
     sink = if opts[:reentrant_sink], do: {ReentrantSink, :emit, [self(), session]}, else: {Sink, :emit, [self()]}
 
-    {:ok, [spec]} =
-      Adapter.listener_child_specs(profile,
-        sink_mfa: sink,
-        identity_timeout_ms: Keyword.get(opts, :identity_timeout_ms, 2_500),
-        ingress: %{
-          mode: :linked_device,
-          profile: profile,
-          transport: Keyword.get(opts, :transport, Transport),
-          sync_history: false,
-          sync_full_history: false,
-          config: %{session: session, test_pid: self()}
-        }
+    transport = Keyword.get(opts, :transport, Transport)
+
+    client =
+      Client.new!(Adapter,
+        id: "identity-#{System.unique_integer([:positive])}",
+        config: [profile: profile],
+        transport: transport
       )
+
+    config = %{
+      profile: profile,
+      session: session,
+      test_pid: self(),
+      sync_history: false,
+      sync_full_history: false
+    }
+
+    spec =
+      {ConnectionWorker,
+       client: client,
+       admission_mfa: {Sink, :chat, [self()]},
+       lifecycle_mfa: sink,
+       identity_timeout_ms: Keyword.get(opts, :identity_timeout_ms, 2_500),
+       transport: transport,
+       config: config}
 
     worker = start_supervised!(spec)
     Agent.update(session, &Map.put(&1, :worker, worker))
@@ -151,8 +166,8 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
     assert ConnectionWorker.status(worker).identity.display_name == "New name"
   end
 
-  test "legacy transports remain connected with explicit unsupported identity" do
-    {worker, parent, _, profile} = worker(%{}, transport: LegacyTransport)
+  test "a transport without identity support remains connected" do
+    {worker, parent, _, profile} = worker(%{}, transport: MinimalTransport)
     assert %{identity_status: :unavailable, identity_error: :unsupported, identity: nil} = open(parent, profile)
     assert ConnectionWorker.status(worker).status == :connected
     assert :ok = ConnectionWorker.refresh_identity(worker)
@@ -314,10 +329,9 @@ defmodule Jido.Chat.WhatsApp.IdentityLifecycleTest do
       )
 
     send(parent, {:amarula, :messages_upsert, %{messages: [msg]}})
-    assert_receive {:chat, payload}
-    assert {:ok, incoming} = Adapter.transform_incoming(payload)
-    assert incoming.author.is_me
-    assert incoming.was_mentioned
+    assert_receive {:chat, [%Jido.Signal{} = signal]}
+    assert signal.data["sender"]["is_self"]
+    assert signal.data["mentioned"]
     assert ConnectionWorker.status(worker).identity.display_name == nil
   end
 end

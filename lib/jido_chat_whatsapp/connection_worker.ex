@@ -1,12 +1,11 @@
 defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   @moduledoc """
-  Linked-device ingress translation, supervised by the host runtime.
+  Linked-device ingress translation for the shared Chat Sensor.
 
-  `sink_mfa` receives chat payloads and normalized media/reaction event envelopes.
-  Media envelopes carry opaque references, never private download descriptors.
-  The same sink receives sanitized lifecycle ActionEvent envelopes, including
-  sensitive QR data, with profile/attempt/source correlation. The callback
-  receives its base arguments followed by `[payload, opts]`.
+  Chat input is normalized through the configured Client and admitted to the
+  Sensor as public Signals. Media Signals carry opaque references, never private
+  download descriptors. An optional private lifecycle callback receives
+  sanitized status maps. It is not a chat Signal boundary.
   Lifecycle callbacks run in order outside the worker and may query its status.
   Identity is fetched asynchronously after socket open and cached; availability
   is separate from connection status. `refresh_identity/1` can retrieve a late
@@ -19,15 +18,44 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
 
   use GenServer
 
-  alias Jido.Chat.{ActionEvent, EventEnvelope, WebhookRequest}
-  alias Jido.Chat.WhatsApp.{AccountIdentity, Adapter, Message, Pairing}
+  alias Jido.Chat.Client
+  alias Jido.Chat.WhatsApp.{AccountIdentity, Message, Pairing}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   @storage_retry_interval 100
 
-  @type sink_mfa :: {module(), atom(), [term()]}
+  @type callback_mfa :: {module(), atom(), [term()]}
 
-  @spec start_link(keyword()) :: GenServer.on_start()
+  @doc false
+  def child_spec({%Client{id: id}, sensor, opts} = argument)
+      when is_binary(id) and is_pid(sensor) and is_list(opts) do
+    %{
+      id: {__MODULE__, id},
+      start: {__MODULE__, :start_link, [argument]},
+      type: :worker
+    }
+  end
+
+  def child_spec(opts) when is_list(opts) do
+    id =
+      case Keyword.get(opts, :client) do
+        %Client{id: client_id} -> {__MODULE__, client_id}
+        _ -> __MODULE__
+      end
+
+    %{id: id, start: {__MODULE__, :start_link, [opts]}, type: :worker}
+  end
+
+  @spec start_link({Client.t(), pid(), keyword()} | keyword()) :: GenServer.on_start()
+  def start_link({%Client{} = client, sensor, opts}) when is_pid(sensor) and is_list(opts) do
+    GenServer.start_link(
+      __MODULE__,
+      opts
+      |> Keyword.put(:client, client)
+      |> Keyword.put(:sensor, sensor)
+    )
+  end
+
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc """
@@ -64,18 +92,24 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
-    sink = Keyword.fetch!(opts, :sink_mfa)
+    Process.flag(:sensitive, true)
+    client = Keyword.fetch!(opts, :client)
+    admission = admission(opts)
+    lifecycle = Keyword.get(opts, :lifecycle_mfa)
     config = Keyword.fetch!(opts, :config)
 
     timeout = Keyword.get(opts, :identity_timeout_ms, 2_500)
 
     with :ok <- validate_identity_timeout(timeout),
-         :ok <- validate_sink(sink) do
+         :ok <- validate_admission(admission),
+         :ok <- validate_callback(lifecycle) do
       state = %{
-        bridge_id: Keyword.fetch!(opts, :bridge_id),
-        sink_mfa: sink,
-        sink_opts: Keyword.get(opts, :sink_opts, []),
-        transport: Keyword.get(opts, :transport, AmarulaClient),
+        client: client,
+        admission: admission,
+        sensor_monitor: monitor_sensor(admission),
+        lifecycle_mfa: lifecycle,
+        lifecycle_opts: Keyword.get(opts, :lifecycle_opts, []),
+        transport: Keyword.get(opts, :transport, client.transport || AmarulaClient),
         storage_token: nil,
         storage_monitor: nil,
         storage_retry: nil,
@@ -97,7 +131,7 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         identity_error: :not_connected,
         identity_request: nil,
         identity_timeout_ms: timeout,
-        lifecycle_dispatcher: start_dispatcher(sink)
+        lifecycle_dispatcher: start_dispatcher(lifecycle)
       }
 
       case connect_with_storage(state) do
@@ -224,7 +258,10 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
         {:noreply, wait_for_storage(state)}
 
       healthy?(state) ->
-        {:noreply, handle_event(event, data, state)}
+        case handle_event(event, data, state) do
+          {:stop, reason, next} -> {:stop, reason, next}
+          next -> {:noreply, next}
+        end
 
       true ->
         stop_connection(state)
@@ -270,6 +307,9 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     notify(state, :qr_expired)
     {:noreply, state}
   end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{sensor_monitor: ref} = state),
+    do: {:stop, :normal, state}
 
   def handle_info({:DOWN, ref, :process, _pid, _}, %{relay_monitor: ref} = state) do
     if storage_healthy?(state.storage_token),
@@ -483,14 +523,15 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp handle_event(:history_sync, %{messages: messages}, state) when is_list(messages) do
-    if Map.get(state.config, :sync_history, true),
-      do: emit_messages(messages, %{history: true, event: :history_sync}, state)
-
-    state
+    if Map.get(state.config, :sync_history, true) do
+      admission_result(messages, %{history: true, event: :history_sync}, state)
+    else
+      state
+    end
   end
 
   defp handle_event(:messages_upsert, %{messages: messages} = data, state) when is_list(messages) do
-    emit_messages(
+    admission_result(
       messages,
       %{
         event: :messages_upsert,
@@ -500,8 +541,6 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
       },
       state
     )
-
-    state
   end
 
   defp handle_event(:connection_update, %{qr: qr}, state) when is_binary(qr) do
@@ -545,28 +584,33 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     _, _ -> :failed
   end
 
+  defp admission_result(messages, metadata, state) do
+    case emit_messages(messages, metadata, state) do
+      :ok -> state
+      {:error, _} -> {:stop, :input_rejected, state}
+    end
+  end
+
   defp emit_messages(messages, metadata, state) do
     aliases = account_jids(state)
 
-    Enum.each(messages, fn msg ->
-      payload =
+    payloads =
+      Enum.map(messages, fn msg ->
         msg
         |> Message.to_payload(Map.put(metadata, :profile, state.profile))
         |> Map.put(:account_jids, aliases)
         |> normalize_sender(state)
+      end)
 
-      case sink_payload(payload, state) do
-        {:ok, event} ->
-          invoke_sink(
-            state.sink_mfa,
-            event,
-            state.sink_opts ++ [mode: :payload, path: "/whatsapp/#{metadata.event}", method: "WHATSAPP"]
-          )
-
-        {:error, _reason} ->
-          if payload.type == :media, do: notify(state, :ingress_normalization_failed)
-      end
-    end)
+    with {:ok, delivery} <-
+           Jido.Chat.normalize(state.client, payloads,
+             conn: state.conn,
+             profile: state.profile,
+             transport: state.transport
+           ),
+         :ok <- admit(state.admission, delivery.signals) do
+      :ok
+    end
   end
 
   defp normalize_sender(%{from_jid: jid} = payload, state) when is_binary(jid) do
@@ -581,16 +625,6 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   end
 
   defp normalize_sender(payload, _state), do: payload
-
-  defp sink_payload(%{type: type} = payload, state) when type in [:reaction, :media] do
-    Adapter.parse_event(WebhookRequest.new(%{adapter_name: :whatsapp, payload: payload}),
-      conn: state.conn,
-      profile: state.profile,
-      transport: state.transport
-    )
-  end
-
-  defp sink_payload(payload, _state), do: {:ok, payload}
 
   defp clear_qr(state) do
     if state.qr_timer, do: Process.cancel_timer(state.qr_timer)
@@ -612,55 +646,36 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
   defp notify(state, event) do
     snapshot = notification(state, event)
 
-    metadata =
-      Map.merge(snapshot, %{
-        category: :connection_lifecycle,
-        source: self(),
-        presentation: Pairing.presentation(snapshot)
-      })
+    if state.lifecycle_dispatcher do
+      payload =
+        Map.merge(snapshot, %{
+          category: :connection_lifecycle,
+          presentation: Pairing.presentation(snapshot)
+        })
 
-    payload =
-      ActionEvent.new(%{
-        adapter: Adapter,
-        adapter_name: :whatsapp,
-        action_id: "connection_update",
-        value: Atom.to_string(event),
-        raw: %{},
-        metadata: metadata
-      })
+      send(state.lifecycle_dispatcher, {:notify, payload, state.lifecycle_opts})
+    end
 
-    envelope = EventEnvelope.new(%{adapter_name: :whatsapp, event_type: :action, payload: payload, raw: %{}})
-    send(state.lifecycle_dispatcher, {:notify, envelope, state.sink_opts})
+    :ok
   end
 
   # Deliver callbacks in order outside the worker so sinks may safely query
   # status or request an identity refresh. No new runtime supervisor is needed.
-  defp start_dispatcher(sink), do: spawn_link(fn -> dispatch_loop(sink) end)
+  defp start_dispatcher(nil), do: nil
+  defp start_dispatcher(callback), do: spawn_link(fn -> dispatch_loop(callback) end)
+  defp stop_dispatcher(%{lifecycle_dispatcher: nil}), do: :ok
   defp stop_dispatcher(state), do: Process.exit(state.lifecycle_dispatcher, :shutdown)
 
-  defp dispatch_loop(sink) do
+  defp dispatch_loop(callback) do
     receive do
       {:notify, payload, opts} ->
-        dispatch_notification(sink, payload, opts)
-        dispatch_loop(sink)
+        deliver_notification(callback, payload, opts)
+        dispatch_loop(callback)
     end
   end
 
-  defp dispatch_notification(sink, payload, opts) do
-    case deliver_notification(sink, payload, opts) do
-      {:error, :runtime_not_ready} ->
-        receive do
-        after
-          100 -> dispatch_notification(sink, payload, opts)
-        end
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp deliver_notification(sink, payload, opts) do
-    invoke_sink(sink, payload, opts)
+  defp deliver_notification(callback, payload, opts) do
+    invoke_callback(callback, payload, opts)
   rescue
     _ -> :error
   catch
@@ -737,7 +752,36 @@ defmodule Jido.Chat.WhatsApp.ConnectionWorker do
     end
   end
 
-  defp invoke_sink({module, function, args}, payload, opts), do: apply(module, function, args ++ [payload, opts])
-  defp validate_sink({module, function, args}) when is_atom(module) and is_atom(function) and is_list(args), do: :ok
-  defp validate_sink(_), do: {:error, :invalid_sink_mfa}
+  defp admission(opts) do
+    cond do
+      is_pid(opts[:sensor]) -> {:sensor, opts[:sensor], Keyword.get(opts, :push_timeout, 5_000)}
+      match?({_, _, _}, opts[:admission_mfa]) -> {:callback, opts[:admission_mfa]}
+      true -> :invalid
+    end
+  end
+
+  defp admit({:sensor, sensor, timeout}, signals), do: Jido.Chat.Sensor.push(sensor, signals, timeout)
+  defp admit({:callback, callback}, signals), do: invoke_callback(callback, signals, [])
+
+  defp monitor_sensor({:sensor, sensor, _}), do: Process.monitor(sensor)
+  defp monitor_sensor(_), do: nil
+
+  defp invoke_callback({module, function, args}, payload, opts),
+    do: apply(module, function, args ++ [payload, opts])
+
+  defp validate_admission({:sensor, sensor, timeout})
+       when is_pid(sensor) and is_integer(timeout) and timeout > 0,
+       do: :ok
+
+  defp validate_admission({:callback, callback}), do: validate_required_callback(callback)
+  defp validate_admission(_), do: {:error, :invalid_admission}
+
+  defp validate_callback(nil), do: :ok
+  defp validate_callback(callback), do: validate_required_callback(callback)
+
+  defp validate_required_callback({module, function, args})
+       when is_atom(module) and not is_nil(module) and is_atom(function) and is_list(args),
+       do: :ok
+
+  defp validate_required_callback(_), do: {:error, :invalid_callback}
 end

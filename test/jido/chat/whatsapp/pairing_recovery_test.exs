@@ -1,7 +1,8 @@
 defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
   use ExUnit.Case, async: true
+  alias Jido.Chat.WhatsApp
+  alias Jido.Chat.WhatsApp.ConnectionWorker
   alias Jido.Chat.WhatsApp.ProtocolStub, as: Control
-  alias Jido.Chat.WhatsApp.{ConnectionWorker, PairingSession}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   def connect(config, opts) do
@@ -30,7 +31,8 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
     supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
 
     {:ok, %{session: session}} =
-      PairingSession.execute(%{op: :begin, owner: self()}, :owner,
+      WhatsApp.authenticate(%{op: :begin}, :owner,
+        owner: self(),
         supervisor: supervisor,
         attempt_id: "recovery_#{System.unique_integer([:positive])}",
         context: nil,
@@ -55,13 +57,13 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
     event(c, :pairing_success, %{})
     event(c, :error, :xml_stream_end)
     assert ConnectionWorker.status(c.worker).status == :reconnecting
-    assert {:ok, %{phase: :pending, qr: nil}} = command(c, :status)
+    assert {:ok, %{phase: :pending}} = command(c, :status)
     assert {:ok, %{phase: :pending}} = command(c, :retry)
     event(c, :connection_update, %{connection: :disconnected})
     assert {:ok, %{phase: :pending}} = command(c, :status)
     connect_identity(c, identity())
-    assert {:ok, %{phase: :confirm}} = command(c, :status)
-    assert {:ok, %{phase: :confirm}} = command(c, :retry)
+    assert {:ok, %{phase: :authenticated}} = command(c, :status)
+    assert {:ok, %{phase: :authenticated}} = command(c, :retry)
     assert ConnectionWorker.status(c.worker).attempt_id == c.attempt
     refute_received {:connection, _}
     refute_received :transport_stopped
@@ -71,7 +73,7 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
   test "exhausted transport retries are terminal and explicit retry retains the profile", c do
     :ok = GenServer.call(c.control, {:set, %{connection: :closed}})
     event(c, :error, :timeout)
-    assert {:ok, %{phase: :failed, qr: nil}} = command(c, :status)
+    assert {:ok, %{phase: :failed}} = command(c, :status)
     assert {:ok, %{phase: :pending}} = command(c, :retry)
     assert_received :transport_stopped
     assert_received {:connection, profile}
@@ -84,11 +86,10 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
     connect_identity(c, {:error, :unavailable})
     assert {:ok, %{phase: :failed}} = command(c, :status)
     :ok = GenServer.call(c.control, {:set, %{identity: identity()}})
-    :erlang.trace(c.worker, true, [:receive])
     assert {:ok, %{phase: phase}} = command(c, :retry)
-    assert phase in [:pending, :confirm]
+    assert phase in [:pending, :authenticated]
     await_identity(c)
-    assert {:ok, %{phase: :confirm}} = command(c, :status)
+    assert {:ok, %{phase: :authenticated}} = command(c, :status)
     refute_received {:connection, _}
     refute_received :transport_stopped
     refute_received :transport_logged_out
@@ -96,13 +97,13 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
 
   test "unavailable transport cannot claim to be recovering", c do
     assert AmarulaClient.recovery_status(c.control) == :reconnecting
-    assert :ok = command(c, :cancel)
+    assert {:ok, %{phase: :cancelled}} = command(c, :cancel)
     stop_supervised(Control)
     assert AmarulaClient.recovery_status(c.control) == :failed
   end
 
   defp identity, do: {:ok, %{phone_number: "+15550001", account_jids: ["15550001@s.whatsapp.net"]}}
-  defp command(c, op), do: PairingSession.execute(%{op: op, session: c.session}, :owner, [])
+  defp command(c, op), do: WhatsApp.authenticate(%{op: op, session: c.session}, :owner, [])
 
   defp event(c, event, payload) do
     send(c.worker, {:transport_event, c.attempt, event, payload})
@@ -111,14 +112,25 @@ defmodule Jido.Chat.WhatsApp.PairingRecoveryTest do
 
   defp connect_identity(c, identity) do
     :ok = GenServer.call(c.control, {:set, %{connection: :connected, identity: identity}})
-    :erlang.trace(c.worker, true, [:receive])
     event(c, :connection_update, %{connection: :open})
     await_identity(c)
   end
 
   defp await_identity(c) do
-    worker = c.worker
-    assert_receive {:trace, ^worker, :receive, {:identity_result, _, _, _}}
-    :erlang.trace(worker, false, [:receive])
+    assert eventually(fn -> ConnectionWorker.status(c.worker).identity_status != :pending end)
+  end
+
+  defp eventually(fun, attempts \\ 100) do
+    case fun.() do
+      result when result not in [false, nil] ->
+        result
+
+      _ when attempts > 1 ->
+        Process.sleep(10)
+        eventually(fun, attempts - 1)
+
+      _ ->
+        false
+    end
   end
 end

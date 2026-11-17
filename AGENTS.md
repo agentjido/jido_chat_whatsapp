@@ -1,25 +1,17 @@
-# AGENTS.md - Jido Chat WhatsApp Development Guide
+# Repository guidance
 
-`jido_chat_whatsapp` is the WhatsApp linked-device adapter for `Jido.Chat`.
+This package is a Jido Chat V3 provider adapter.
 
-## Commands
-
-- `mix setup` - Fetch dependencies.
-- `mix test` - Run the default non-live test suite.
-- `mix test --include live` - Run explicitly enabled live WhatsApp tests.
-- `mix quality` - Run the Jido package quality gate.
-- `mix coveralls` - Run coverage.
-- `mix install_hooks` - Explicitly install local git hooks.
-
-## Rules
-
-- Keep live WhatsApp tests excluded by default with the `:live` tag.
-- Do not commit `.env`, credentials, QR strings, pairing codes, or Amarula profile storage.
-- Prefer `Jido.Chat.Adapter` callbacks for shared behavior.
-- Preserve the adapter boundary: this package owns shared transport infrastructure;
-  hosts such as `jido_messaging` own listener supervision, restart policy and orchestration.
-- Keep the Amarula dependency behind `Jido.Chat.WhatsApp.Transport` so another WhatsApp transport can be added later.
-
-## Release Hygiene
-
-- Do not modify `CHANGELOG.md`; release notes are generated from Git history during release, so keep changes focused on proper Conventional Commits.
+- Keep the Adapter stateless.
+- Use an explicit `Jido.Chat.Client` for every request.
+- Put inbound chat data through `Jido.Chat.WhatsApp.Source` and
+  `Jido.Chat.Sensor`.
+- Keep rooms, routing, agents, and history in Jido Chat core.
+- Keep Amarula connection and session processes inside this package.
+- Keep pairing, lifecycle, and storage callbacks private.
+- Never put credentials, QR data, media keys, provider structs, or process
+  identifiers in public Signals.
+- Do not read profile or credential selection from application environment.
+- Test provider behavior with offline transports. Do not make live provider
+  calls unless the user gives explicit authority.
+- Run `mix test` and `mix quality` before delivery.

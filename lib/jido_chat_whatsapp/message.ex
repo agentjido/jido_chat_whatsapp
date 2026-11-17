@@ -3,8 +3,6 @@ defmodule Jido.Chat.WhatsApp.Message do
   Normalization helpers for Amarula messages.
   """
 
-  alias Jido.Chat.ReactionEvent
-
   @media_type_pattern ~r/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/
 
   @doc "Converts an Amarula message into a plain payload map suitable for listener ingress."
@@ -107,7 +105,7 @@ defmodule Jido.Chat.WhatsApp.Message do
   end
 
   @doc "Builds a canonical reaction event from a normalized Amarula reaction payload."
-  @spec reaction_event(map()) :: {:ok, ReactionEvent.t()} | {:error, term()}
+  @spec reaction_event(map()) :: {:ok, map()} | {:error, term()}
   def reaction_event(payload) when is_map(payload) do
     content = map_get(payload, [:content, "content"]) || %{}
     key = map_get(content, [:key, "key"])
@@ -118,8 +116,7 @@ defmodule Jido.Chat.WhatsApp.Message do
       {:error, :missing_reaction_target}
     else
       {:ok,
-       ReactionEvent.new(%{
-         adapter_name: :whatsapp,
+       %{
          thread_id: thread_id(channel_jid),
          channel_id: channel_jid,
          message_id: to_string(message_id),
@@ -128,7 +125,7 @@ defmodule Jido.Chat.WhatsApp.Message do
          user: reaction_user(payload),
          raw: payload,
          metadata: %{from_me: truthy?(map_get(payload, [:from_me, "from_me"]))}
-       })}
+       }}
     end
   end
 
@@ -246,7 +243,10 @@ defmodule Jido.Chat.WhatsApp.Message do
   defp media_kind(:sticker), do: :image
   defp media_kind("sticker"), do: :image
   defp media_kind(kind) when kind in [:image, :audio, :video, :file], do: kind
-  defp media_kind(kind) when kind in ["image", "audio", "video", "file"], do: String.to_atom(kind)
+  defp media_kind("image"), do: :image
+  defp media_kind("audio"), do: :audio
+  defp media_kind("video"), do: :video
+  defp media_kind("file"), do: :file
   defp media_kind(_), do: :file
 
   defp normalize_media_type(value) when is_binary(value) do
@@ -292,19 +292,16 @@ defmodule Jido.Chat.WhatsApp.Message do
     %{user_id: user_id, user_name: user_id}
   end
 
-  defp normalize_type(type) when is_atom(type), do: type
-
-  defp normalize_type(type) when is_binary(type) do
-    type
-    |> String.trim()
-    |> String.downcase()
-    |> String.to_atom()
-  end
-
+  defp normalize_type(type) when type in [:text, "text"], do: :text
+  defp normalize_type(type) when type in [:media, "media"], do: :media
+  defp normalize_type(type) when type in [:edit, "edit"], do: :edit
+  defp normalize_type(type) when type in [:revoke, "revoke"], do: :revoke
+  defp normalize_type(type) when type in [:reaction, "reaction"], do: :reaction
   defp normalize_type(_), do: :other
 
-  defp normalize_kind(kind) when kind in [:pn, :lid, :group], do: kind
-  defp normalize_kind(kind) when kind in ["pn", "lid", "group"], do: String.to_atom(kind)
+  defp normalize_kind(kind) when kind in [:pn, "pn"], do: :pn
+  defp normalize_kind(kind) when kind in [:lid, "lid"], do: :lid
+  defp normalize_kind(kind) when kind in [:group, "group"], do: :group
   defp normalize_kind(_), do: nil
 
   defp server_for(:pn), do: "s.whatsapp.net"

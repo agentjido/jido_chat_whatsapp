@@ -4,11 +4,13 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
 
   import ExUnit.CaptureLog
 
+  alias Jido.Chat.Client
+  alias Jido.Chat.WhatsApp.Adapter
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
   defmodule MockMediaDownloadAdapter do
     def run(request) do
-      body = Process.get({__MODULE__, :body})
+      body = :persistent_term.get({__MODULE__, :body})
       {request, %Req.Response{status: 200, body: body}}
     end
   end
@@ -172,21 +174,35 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
       }
     }
 
-    assert {:ok, incoming} = Jido.Chat.WhatsApp.Adapter.transform_incoming(payload, profile: profile)
-    assert {:ok, ^plaintext} = Jido.Chat.WhatsApp.Adapter.fetch_media(hd(incoming.media).url, profile: profile)
+    client =
+      Client.new!(Adapter,
+        id: "media-download",
+        config: [profile: profile],
+        transport: AmarulaClient
+      )
+
+    assert {:ok, delivery} = Jido.Chat.normalize(client, payload, conn: conn)
+    [signal] = delivery.signals
+    reference = hd(signal.data["media"])["resource_ref"]
+
+    assert {:ok, result} = Jido.Chat.download_file(client, reference, options: [conn: conn])
+    assert Base.decode64!(result.data["result"]["content_base64"]) == plaintext
   end
 
   defp mock_download(body) do
     previous = Application.fetch_env(:amarula, :req_options)
+    body_key = {MockMediaDownloadAdapter, :body}
 
     on_exit(fn ->
       case previous do
         {:ok, value} -> Application.put_env(:amarula, :req_options, value)
         :error -> Application.delete_env(:amarula, :req_options)
       end
+
+      :persistent_term.erase(body_key)
     end)
 
     Application.put_env(:amarula, :req_options, adapter: MockMediaDownloadAdapter)
-    Process.put({MockMediaDownloadAdapter, :body}, body)
+    :persistent_term.put(body_key, body)
   end
 end

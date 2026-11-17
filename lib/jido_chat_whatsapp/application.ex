@@ -2,8 +2,8 @@ defmodule Jido.Chat.WhatsApp.Application do
   @moduledoc """
   Owns the adapter's shared transport infrastructure, without opening profiles.
 
-  Hosts supervise listener child specs. During migration, hosts that already own
-  Amarula may set `config :jido_chat_whatsapp, start_runtime: false` before boot.
+  Hosts supervise Sensors or linked-device workers. This application owns one
+  Amarula runtime generation. It does not adopt an external runtime.
   """
 
   use Application
@@ -12,7 +12,6 @@ defmodule Jido.Chat.WhatsApp.Application do
 
   @impl true
   def start(_type, _args) do
-    children = if Application.get_env(:jido_chat_whatsapp, :start_runtime, true), do: [AmarulaRuntime], else: []
-    Supervisor.start_link(children, strategy: :one_for_one, name: Jido.Chat.WhatsApp.Supervisor)
+    Supervisor.start_link([AmarulaRuntime], strategy: :one_for_one, name: Jido.Chat.WhatsApp.Supervisor)
   end
 end

@@ -9,7 +9,8 @@ defmodule Jido.Chat.WhatsApp.Transport.MediaReference do
 
   @doc "Seals a bounded descriptor under a profile-specific, domain-separated key."
   @spec seal(Amarula.Content.Media.t(), binary(), String.t()) :: {:ok, String.t()} | {:error, atom()}
-  def seal(%Amarula.Content.Media{} = media, secret, profile) do
+  def seal(%Amarula.Content.Media{} = media, secret, profile)
+      when is_binary(secret) and byte_size(secret) >= 32 and is_binary(profile) and profile != "" do
     plaintext = :erlang.term_to_binary(media)
 
     if byte_size(plaintext) <= @max_plaintext do
@@ -23,6 +24,8 @@ defmodule Jido.Chat.WhatsApp.Transport.MediaReference do
       {:error, :invalid_media_reference}
     end
   end
+
+  def seal(_, _, _), do: {:error, :invalid_media_reference}
 
   @doc "Authenticates a versioned reference before decoding its bounded descriptor."
   @spec open(String.t(), binary(), String.t()) :: {:ok, Amarula.Content.Media.t()} | {:error, atom()}

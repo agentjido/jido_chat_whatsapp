@@ -10,36 +10,36 @@ defmodule Jido.Chat.WhatsApp.SendOptions do
   alias Jido.Chat.WhatsApp.MessageFormatter
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
-  @schema Zoi.struct(
+  @schema Jido.Joi.struct(
             __MODULE__,
             %{
-              transport: Zoi.any() |> Zoi.default(AmarulaClient),
-              format: Zoi.enum([:markdown, :plain_text]) |> Zoi.default(:plain_text),
-              conn: Zoi.any() |> Zoi.nullish(),
-              connection: Zoi.any() |> Zoi.nullish(),
-              profile: Zoi.any() |> Zoi.nullish(),
-              quoted: Zoi.any() |> Zoi.nullish(),
-              mentions: Zoi.any() |> Zoi.nullish(),
-              caption: Zoi.string() |> Zoi.nullish(),
-              seconds: Zoi.integer() |> Zoi.nullish(),
-              ptt: Zoi.boolean() |> Zoi.nullish(),
-              ptv: Zoi.boolean() |> Zoi.nullish(),
-              view_once: Zoi.boolean() |> Zoi.nullish(),
-              file_name: Zoi.string() |> Zoi.nullish(),
-              filename: Zoi.string() |> Zoi.nullish(),
-              title: Zoi.string() |> Zoi.nullish(),
-              status: Zoi.any() |> Zoi.nullish(),
-              action: Zoi.any() |> Zoi.nullish()
+              transport: Jido.Joi.any() |> Jido.Joi.default(AmarulaClient),
+              format: Jido.Joi.enum([:markdown, :plain_text]) |> Jido.Joi.default(:plain_text),
+              conn: Jido.Joi.any() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              connection: Jido.Joi.any() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              profile: Jido.Joi.any() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              quoted: Jido.Joi.any() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              mentions: Jido.Joi.any() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              caption: Jido.Joi.string() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              seconds: Jido.Joi.integer() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              ptt: Jido.Joi.boolean() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              ptv: Jido.Joi.boolean() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              view_once: Jido.Joi.boolean() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              file_name: Jido.Joi.string() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              filename: Jido.Joi.string() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              title: Jido.Joi.string() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              status: Jido.Joi.any() |> Jido.Joi.nullable() |> Jido.Joi.optional(),
+              action: Jido.Joi.any() |> Jido.Joi.nullable() |> Jido.Joi.optional()
             },
             coerce: true
           )
 
-  @type t :: unquote(Zoi.type_spec(@schema))
+  @type t :: unquote(Jido.Joi.type_spec(@schema))
 
-  @enforce_keys Zoi.Struct.enforce_keys(@schema)
-  defstruct Zoi.Struct.struct_fields(@schema)
+  @enforce_keys Jido.Joi.enforce_keys(@schema)
+  defstruct Jido.Joi.struct_fields(@schema)
 
-  @doc "Returns the Zoi schema for send options."
+  @doc "Returns the Joi schema for send options."
   def schema, do: @schema
 
   @doc "Builds typed send options from keyword, map, or struct input."

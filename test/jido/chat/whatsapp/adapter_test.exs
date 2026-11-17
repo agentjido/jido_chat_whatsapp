@@ -1,575 +1,188 @@
 defmodule Jido.Chat.WhatsApp.AdapterTest do
-  import Jido.Chat.WhatsApp.TestHelpers
-  use ExUnit.Case, async: true
+  use Jido.Chat.AdapterTestKit, adapter: Jido.Chat.WhatsApp.Adapter, async: true
 
   alias Jido.Chat
-  alias Jido.Chat.{EventEnvelope, ReactionEvent}
-  alias Jido.Chat.WhatsApp.Adapter
-  alias Jido.Chat.WhatsApp.TestTransport, as: MockTransport
+  alias Jido.Chat.Adapter, as: ChatAdapter
+  alias Jido.Chat.Client
+  alias Jido.Chat.WhatsApp
+  alias Jido.Chat.WhatsApp.{Adapter, Source, TestTransport}
 
-  test "capabilities matrix declares supported surfaces" do
-    caps = Adapter.capabilities()
+  @room "15551234567@s.whatsapp.net"
 
-    assert Adapter.channel_type() == :whatsapp
-    assert caps.send_message == :native
-    assert caps.send_file == :native
-    assert caps.fetch_media == :native
-    assert caps.parse_event == :native
-    assert caps.fetch_messages == :unsupported
-
-    assert :ok = Chat.Adapter.validate_capabilities(Adapter)
+  defp client do
+    Client.new!(Adapter,
+      id: "whatsapp-#{System.unique_integer([:positive])}",
+      config: [profile: "test-profile"],
+      transport: TestTransport
+    )
   end
 
-  test "transform_incoming/1 normalizes text payloads" do
+  defp private, do: [options: [conn: self()]]
+
+  test "client discovery is local and explicit" do
+    value = client()
+
+    assert WhatsApp.adapter() == Adapter
+    assert WhatsApp.source() == Source
+    assert Adapter.default_transport() == Jido.Chat.WhatsApp.Transport.AmarulaClient
+    assert :ok = ChatAdapter.validate_capabilities(Adapter)
+    assert Source.mode() == :push
+    assert Source.key(value, []) == Source.key(value, profile: "test-profile")
+  end
+
+  test "message, stream, edit, delete, typing, and reactions use the selected connection" do
+    value = client()
+
+    assert {:ok, sent} = Chat.send_text(value, @room, "**hello**", private() ++ [format: :markdown])
+    assert sent.data["result"]["id"] == "wamid.text"
+    assert_receive {:send_text, _, @room, "*hello*", []}
+
+    assert {:ok, streamed} = Chat.stream_text(value, @room, ["a", "b"], private())
+    assert streamed.data["result"]["text"] == "ab"
+    assert_receive {:send_text, _, @room, "ab", []}
+
+    assert {:ok, edited} = Chat.edit_message(value, @room, "m-1", "fixed", private())
+    assert edited.data["result"]["status"] == "updated"
+    assert_receive {:send_edit, _, {@room, "m-1", true}, "fixed"}
+
+    assert {:ok, deleted} = Chat.delete_message(value, @room, "m-1", private())
+    assert deleted.data["result"] == %{"acknowledged" => true}
+    assert_receive {:send_revoke, _, {@room, "m-1", true}}
+
+    assert {:ok, typed} = Chat.start_typing(value, @room, private())
+    assert typed.data["result"] == %{"acknowledged" => true}
+    assert_receive {:send_chatstate, _, @room, :composing}
+
+    assert {:ok, _} = Chat.add_reaction(value, @room, "m-1", "👍", private())
+    assert_receive {:send_reaction, _, {@room, "m-1", false}, "👍"}
+
+    assert {:ok, _} = Chat.remove_reaction(value, @room, "m-1", "👍", private())
+    assert_receive {:send_reaction, _, {@room, "m-1", false}, ""}
+  end
+
+  test "files and client-scoped media downloads return canonical results" do
+    value = client()
+    source = %{"content_base64" => Base.encode64("image bytes"), "filename" => "photo.jpg"}
+
+    assert {:ok, sent} =
+             Chat.send_file(value, @room, source, private() ++ [caption: "photo", media_kind: :image])
+
+    assert sent.data["result"]["id"] == "wamid.media"
+    assert_receive {:send_media, _, @room, :image, "image bytes", media_opts}
+    assert media_opts[:caption] == "photo"
+    assert media_opts[:file_name] == "photo.jpg"
+
+    reference = %{
+      "client_id" => value.id,
+      "kind" => "media",
+      "id" => "whatsapp://media/v1/test-reference"
+    }
+
+    assert {:ok, downloaded} = Chat.download_file(value, reference, private())
+    assert downloaded.data["result"]["content_base64"] == Base.encode64("whatsapp media bytes")
+    assert_receive {:download_media, %Amarula.Content.Media{kind: :image}}
+
+    assert {:error, _} = Chat.download_file(value, Map.put(reference, "client_id", "other"), private())
+    refute_receive {:download_media, _}
+  end
+
+  test "local metadata, thread, user, and direct-message operations are canonical" do
+    value = client()
+
+    assert {:ok, metadata} = Chat.fetch_metadata(value, @room)
+    assert metadata.data["result"] == %{"id" => @room, "kind" => "direct"}
+
+    thread = operation_request(value, :fetch_thread, %{"room_id" => @room, "thread_id" => "reply-1"})
+    assert {:ok, thread_result} = Chat.execute(value, thread)
+    assert thread_result.data["result"]["delivery_room_ref"] == @room
+
+    user = operation_request(value, :get_user, %{"user_id" => @room})
+    assert {:ok, user_result} = Chat.execute(value, user, private())
+    assert user_result.data["result"] == %{"id" => @room, "username" => "+15551234567"}
+
+    dm = operation_request(value, :open_dm, %{"user_id" => "15550001111"})
+    assert {:ok, dm_result} = Chat.execute(value, dm)
+    assert dm_result.data["result"] == %{"id" => "15550001111@s.whatsapp.net", "kind" => "direct"}
+  end
+
+  test "normalization emits stable message, reaction, and failure facts" do
+    value = client()
+
     payload = %{
-      id: "msg-1",
-      channel_jid: "15551234567@s.whatsapp.net",
-      from_jid: "15557654321@s.whatsapp.net",
-      to_jid: "15551234567@s.whatsapp.net",
-      from_me: false,
-      pushname: "Alice",
-      timestamp: 1_706_745_600,
+      id: "m-1",
+      channel_jid: @room,
+      from_jid: "15550002222@s.whatsapp.net",
       type: :text,
+      text: "hello",
       content: "hello",
-      text: "hello"
+      timestamp: 1_700_000_000
     }
 
-    assert {:ok, incoming} = Adapter.transform_incoming(payload)
-    assert incoming.external_room_id == "15551234567@s.whatsapp.net"
-    assert incoming.external_user_id == "15557654321@s.whatsapp.net"
-    assert incoming.text == "hello"
-    assert incoming.chat_type == :dm
-    assert incoming.channel_meta.adapter_name == :whatsapp
-    assert incoming.channel_meta.is_dm == true
-  end
+    assert {:ok, first} = Chat.normalize(value, payload)
+    assert {:ok, second} = Chat.normalize(value, payload)
+    assert first.id == second.id
+    assert [message] = first.signals
+    assert message.type == "jido.chat.message.received"
+    assert message.data["room_id"] == @room
+    assert message.data["sender"]["id"] == "15550002222@s.whatsapp.net"
 
-  test "transform_incoming/1 normalizes push names without changing the author identity" do
-    payload = %{
-      channel_jid: "120363000000000@g.us",
-      from_jid: "15557654321@s.whatsapp.net",
-      text: "hello"
+    reaction = %{
+      id: "reaction-wire",
+      channel_jid: @room,
+      from_jid: "15550002222@s.whatsapp.net",
+      type: :reaction,
+      content: %{key: %{jid: @room, id: "m-1"}, emoji: "👍"}
     }
 
-    for name <- [nil, "", " ", "~", " ~ "] do
-      assert {:ok, incoming} = Adapter.transform_incoming(Map.put(payload, :pushname, name))
-      assert incoming.external_user_id == payload.from_jid
-      assert incoming.author.user_id == payload.from_jid
-      assert is_nil(incoming.author.full_name)
-      assert is_nil(incoming.display_name)
-    end
+    assert {:ok, delivery} = Chat.normalize(value, reaction)
+    assert [fact] = delivery.signals
+    assert fact.type == "jido.chat.reaction.added"
+    assert fact.data["message_id"] == "m-1"
 
-    assert {:ok, incoming} =
-             Adapter.transform_incoming(Map.put(payload, :pushname, "  Zoë @ Work  "))
-
-    assert incoming.author.full_name == "Zoë @ Work"
-    assert incoming.display_name == "Zoë @ Work"
+    assert {:ok, failed} = Chat.normalize(value, %{type: :unknown})
+    assert [failure] = failed.signals
+    assert failure.type == "jido.chat.normalization.failed"
   end
 
-  test "Amarula messages use the same push-name normalization" do
-    message =
-      message(
-        channel: Amarula.Address.pn("15551234567"),
-        from: Amarula.Address.pn("15557654321"),
-        pushname: " ~ ",
-        raw: %{}
-      )
-
-    assert {:ok, incoming} = Adapter.transform_incoming(message)
-    assert incoming.external_user_id == "15557654321@s.whatsapp.net"
-    assert is_nil(incoming.author.full_name)
-    assert is_nil(incoming.display_name)
-  end
-
-  test "transform_incoming/1 normalizes media payloads" do
-    media_key = String.duplicate("k", 32)
-    encrypted_hash = String.duplicate("h", 32)
+  test "media normalization exposes only an opaque client-scoped reference" do
+    value = client()
 
     payload = %{
-      "id" => "msg-2",
-      "channel_jid" => "120363000000000000@g.us",
-      "from_jid" => "15557654321@s.whatsapp.net",
-      "type" => "media",
-      "content" => %{
-        "kind" => "image",
-        "mimetype" => "image/jpeg",
-        "caption" => "look",
-        "file_length" => 123,
-        "direct_path" => "/mms/image/encrypted",
-        "media_key" => media_key,
-        "file_enc_sha256" => encrypted_hash,
-        "width" => 640,
-        "height" => 480
-      }
-    }
-
-    assert {:ok, incoming} = Adapter.transform_incoming(payload)
-    assert incoming.chat_type == :group
-    assert incoming.text == "look"
-    assert [%{kind: :image, media_type: "image/jpeg", size_bytes: 123} = media] = incoming.media
-
-    assert {:ok, "whatsapp media bytes"} =
-             Adapter.fetch_media(media, transport: MockTransport)
-
-    assert_received {:download_media,
-                     %Amarula.Content.Media{
-                       kind: :image,
-                       mimetype: "image/jpeg",
-                       direct_path: "/mms/image/encrypted",
-                       media_key: ^media_key,
-                       file_enc_sha256: ^encrypted_hash
-                     }}
-  end
-
-  test "fetch_media/2 accepts valid descriptor maps" do
-    media_key = String.duplicate("d", 32)
-    encrypted_hash = String.duplicate("e", 32)
-
-    reference = %{
-      "kind" => "document",
-      "direct_path" => "/mms/document/encrypted",
-      "media_key" => media_key,
-      "file_enc_sha256" => encrypted_hash,
-      "file_name" => "report.pdf"
-    }
-
-    assert {:ok, "whatsapp media bytes"} =
-             Adapter.fetch_media(reference, transport: MockTransport)
-
-    assert_received {:download_media,
-                     %Amarula.Content.Media{
-                       kind: :document,
-                       mimetype: nil,
-                       direct_path: "/mms/document/encrypted",
-                       media_key: ^media_key,
-                       file_enc_sha256: ^encrypted_hash,
-                       file_name: "report.pdf"
-                     }}
-  end
-
-  test "fetch_media/2 normalizes blank MIME metadata without changing download behavior" do
-    media_key = String.duplicate("b", 32)
-
-    reference = %{
-      kind: :image,
-      media_type: "image/png",
-      direct_path: "/mms/image/encrypted",
-      media_key: media_key,
-      metadata: %{mimetype: " "}
-    }
-
-    assert {:ok, "whatsapp media bytes"} =
-             Adapter.fetch_media(reference, transport: MockTransport)
-
-    assert_received {:download_media,
-                     %Amarula.Content.Media{
-                       kind: :image,
-                       mimetype: "image/png",
-                       direct_path: "/mms/image/encrypted"
-                     }}
-  end
-
-  test "fetch_media/2 prefers provider metadata and validates references" do
-    media_key = String.duplicate("m", 32)
-
-    media =
-      Jido.Chat.Media.new(%{
-        kind: :file,
-        url: "https://example.com/untrusted",
-        metadata: %{
-          "kind" => "sticker",
-          "direct_path" => "/mms/image/sticker",
-          "media_key" => media_key
-        }
-      })
-
-    assert {:ok, "whatsapp media bytes"} =
-             Adapter.fetch_media(media, transport: MockTransport)
-
-    assert_received {:download_media,
-                     %Amarula.Content.Media{
-                       kind: :sticker,
-                       direct_path: "/mms/image/sticker",
-                       media_key: ^media_key,
-                       url: nil
-                     }}
-
-    valid_url_reference = %{
-      kind: :image,
-      url: "https://mmg.whatsapp.net/mms/image/encrypted",
-      media_key: media_key
-    }
-
-    assert {:ok, "whatsapp media bytes"} =
-             Adapter.fetch_media(valid_url_reference, transport: MockTransport)
-
-    assert_received {:download_media, %Amarula.Content.Media{url: "https://mmg.whatsapp.net/mms/image/encrypted"}}
-
-    invalid_references = [
-      "/mms/image/not-enough-data",
-      %{kind: :image, direct_path: "/mms/image/encrypted", media_key: "short"},
-      %{kind: :image, media_key: media_key},
-      %{kind: :image, url: "http://mmg.whatsapp.net/media", media_key: media_key},
-      %{kind: :image, url: "https://example.com/media", media_key: media_key},
-      %{
+      id: "media-1",
+      channel_jid: @room,
+      from_jid: "15550002222@s.whatsapp.net",
+      type: :media,
+      content: %{
         kind: :image,
-        direct_path: "/mms/image/encrypted",
-        media_key: media_key,
-        file_enc_sha256: "short"
-      }
-    ]
-
-    for reference <- invalid_references do
-      assert {:error, :invalid_media_reference} =
-               Adapter.fetch_media(reference, transport: MockTransport)
-    end
-  end
-
-  test "transform_incoming/1 handles wrapped and unsupported payloads" do
-    payload = %{
-      message: %{
-        id: "msg-1",
-        channel_jid: "15551234567@s.whatsapp.net",
-        from_jid: "15557654321@s.whatsapp.net",
-        type: :text,
-        text: "hello"
+        mimetype: "image/jpeg",
+        media_key: :binary.copy(<<1>>, 32),
+        direct_path: "/media/private",
+        url: "https://mmg.whatsapp.net/private?token=secret",
+        file_sha256: :binary.copy(<<2>>, 32),
+        file_enc_sha256: :binary.copy(<<3>>, 32)
       }
     }
 
-    assert {:ok, incoming} = Adapter.transform_incoming(payload)
-    assert incoming.text == "hello"
+    assert {:ok, delivery} = Chat.normalize(value, payload, conn: self())
+    assert [signal] = delivery.signals
+    assert [media] = signal.data["media"]
 
-    assert {:ok, incoming} =
-             Adapter.transform_incoming(%{
-               "message" => %{
-                 "id" => "msg-2",
-                 "channel_jid" => "15551234567@s.whatsapp.net",
-                 "from_jid" => "15557654321@s.whatsapp.net",
-                 "type" => "text",
-                 "text" => "from string wrapper"
-               }
-             })
+    assert media["resource_ref"] == %{
+             "client_id" => value.id,
+             "kind" => "media",
+             "id" => "whatsapp://media/v1/test-reference"
+           }
 
-    assert incoming.text == "from string wrapper"
-
-    assert {:error, :unsupported_message_type} = Adapter.transform_incoming(:not_a_payload)
-    assert {:error, :missing_channel} = Adapter.transform_incoming(%{id: "msg-1", text: "hello"})
+    encoded = Jason.encode!(Jido.Signal.Codec.to_map(signal))
+    refute encoded =~ "token=secret"
+    refute encoded =~ "media_key"
   end
 
-  test "parse_event/2 wraps messages in EventEnvelope" do
-    request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{
-          id: "msg-1",
-          channel_jid: "15551234567@s.whatsapp.net",
-          from_jid: "15557654321@s.whatsapp.net",
-          type: :text,
-          text: "hello"
-        }
-      })
+  test "unsupported operations do not attempt provider I/O" do
+    value = client()
+    request = operation_request(value, :fetch_messages, %{"room_id" => @room})
 
-    assert {:ok, %EventEnvelope{} = envelope} = Adapter.parse_event(request)
-    assert envelope.event_type == :message
-    assert envelope.thread_id == "whatsapp:15551234567@s.whatsapp.net"
-    assert envelope.payload.text == "hello"
-  end
-
-  test "Thread.post keeps delivery in the chat and preserves explicit provider reply options" do
-    thread =
-      Chat.Thread.new(%{
-        id: "whatsapp:group@g.us:root",
-        adapter_name: :whatsapp,
-        adapter: Adapter,
-        external_room_id: "group@g.us",
-        external_thread_id: "root"
-      })
-
-    for quoted <- [nil, {"root", "alice@s.whatsapp.net"}] do
-      opts = [transport: MockTransport, conn: self(), quoted: quoted]
-      assert {:ok, _post} = Chat.Thread.post(thread, "Answer", opts)
-      assert_receive {:send_text, conn, "group@g.us", "Answer", transport_opts}
-      assert conn == self()
-      assert transport_opts[:quoted] == quoted
-    end
-  end
-
-  test "parse_event/2 wraps reactions in ReactionEvent" do
-    request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{
-          id: "reaction-msg",
-          channel_jid: "15551234567@s.whatsapp.net",
-          from_jid: "15557654321@s.whatsapp.net",
-          type: :reaction,
-          content: %{key: %{jid: "15551234567@s.whatsapp.net", id: "target-msg"}, emoji: "ok"}
-        }
-      })
-
-    assert {:ok, %EventEnvelope{} = envelope} = Adapter.parse_event(request)
-    assert envelope.event_type == :reaction
-    assert %ReactionEvent{} = envelope.payload
-    assert envelope.payload.message_id == "target-msg"
-    assert envelope.payload.emoji == "ok"
-  end
-
-  test "parse_event/2 handles action payloads and existing envelopes as noops" do
-    action_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "connection_update", data: %{profile: "profile-1", connection: :open}}
-      })
-
-    assert {:ok, %EventEnvelope{} = action} = Adapter.parse_event(action_request)
-    assert action.event_type == :action
-    assert action.payload.action_id == "connection_update"
-    assert action.payload.value == "open"
-
-    qr_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "connection_update", data: %{profile: "profile-1", qr: "qr-data"}}
-      })
-
-    assert {:ok, %EventEnvelope{} = qr} = Adapter.parse_event(qr_request)
-    assert qr.payload.value == "qr"
-
-    pairing_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "pairing_code", data: %{profile: "profile-1", code: "12345678"}}
-      })
-
-    assert {:ok, %EventEnvelope{} = pairing} = Adapter.parse_event(pairing_request)
-    assert pairing.payload.value == "12345678"
-
-    fallback_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event: "pairing_success", data: "paired"}
-      })
-
-    assert {:ok, %EventEnvelope{} = fallback} = Adapter.parse_event(fallback_request)
-    assert fallback.payload.action_id == "pairing_success"
-    assert fallback.payload.value == "pairing_success"
-    assert fallback.raw == %{}
-
-    noop_request =
-      Jido.Chat.WebhookRequest.new(%{
-        adapter_name: :whatsapp,
-        payload: %{event_type: :message}
-      })
-
-    assert {:ok, :noop} = Adapter.parse_event(noop_request)
-  end
-
-  test "send_message/3 delegates to configured transport" do
-    assert {:ok, response} =
-             Adapter.send_message("15551234567", "hi",
-               conn: self(),
-               transport: MockTransport,
-               mentions: ["15557654321@s.whatsapp.net"]
-             )
-
-    assert_receive {:resolve_conn, opts}
-    assert opts[:conn] == self()
-
-    assert_receive {:send_text, _, "15551234567@s.whatsapp.net", "hi", opts}
-    assert opts[:mentions] == ["15557654321@s.whatsapp.net"]
-    assert response.external_message_id == "wamid.text"
-    assert response.external_room_id == "15551234567@s.whatsapp.net"
-  end
-
-  test "send_file/3 sends local file bytes through transport" do
-    path = Path.join(System.tmp_dir!(), "jido_chat_whatsapp_test.txt")
-    File.write!(path, "hello file")
-
-    assert {:ok, response} =
-             Adapter.send_file("15551234567@s.whatsapp.net", path,
-               conn: self(),
-               transport: MockTransport,
-               caption: "file caption"
-             )
-
-    assert_receive {:send_media, _, "15551234567@s.whatsapp.net", :document, "hello file", opts}
-    assert opts[:caption] == "file caption"
-    assert response.external_message_id == "wamid.media"
-  after
-    File.rm(Path.join(System.tmp_dir!(), "jido_chat_whatsapp_test.txt"))
-  end
-
-  test "send_file/3 sends in-memory media and rejects remote upload references" do
-    assert {:ok, response} =
-             Adapter.send_file(
-               "15551234567@s.whatsapp.net",
-               %{data: "image-bytes", kind: :image, filename: "photo.jpg", media_type: "image/jpeg"},
-               conn: self(),
-               transport: MockTransport
-             )
-
-    assert_receive {:send_media, _, "15551234567@s.whatsapp.net", :image, "image-bytes", opts}
-    assert opts[:file_name] == "photo.jpg"
-    assert response.external_message_id == "wamid.media"
-
-    assert {:error, {:unsupported_remote_upload, "https://example.com/photo.jpg"}} =
-             Adapter.send_file(
-               "15551234567@s.whatsapp.net",
-               %{url: "https://example.com/photo.jpg", kind: :image, filename: "photo.jpg"},
-               conn: self(),
-               transport: MockTransport
-             )
-
-    assert {:error, :missing_upload_data} =
-             Adapter.send_file(
-               "15551234567@s.whatsapp.net",
-               %{kind: :image, filename: "photo.jpg"},
-               conn: self(),
-               transport: MockTransport
-             )
-  end
-
-  test "edit, delete, reaction, and typing delegate to transport" do
-    assert {:ok, edited} =
-             Adapter.edit_message("15551234567@s.whatsapp.net", "msg-1", "fixed",
-               conn: self(),
-               transport: MockTransport
-             )
-
-    assert edited.status == :edited
-    assert_receive {:send_edit, _, {"15551234567@s.whatsapp.net", "msg-1", true}, "fixed"}
-
-    assert :ok =
-             Adapter.delete_message("15551234567@s.whatsapp.net", "msg-1",
-               conn: self(),
-               transport: MockTransport
-             )
-
-    assert_receive {:send_revoke, _, {"15551234567@s.whatsapp.net", "msg-1", true}}
-
-    assert :ok =
-             Adapter.add_reaction("15551234567@s.whatsapp.net", "msg-1", "ok",
-               conn: self(),
-               transport: MockTransport
-             )
-
-    assert_receive {:send_reaction, _, {"15551234567@s.whatsapp.net", "msg-1", false}, "ok"}
-
-    assert :ok =
-             Adapter.remove_reaction("15551234567@s.whatsapp.net", "msg-1", "ok",
-               conn: self(),
-               transport: MockTransport
-             )
-
-    assert_receive {:send_reaction, _, {"15551234567@s.whatsapp.net", "msg-1", false}, ""}
-
-    assert :ok =
-             Adapter.start_typing("15551234567@s.whatsapp.net",
-               conn: self(),
-               transport: MockTransport,
-               status: :paused
-             )
-
-    assert_receive {:send_chatstate, _, "15551234567@s.whatsapp.net", :paused}
-
-    for {input, expected} <- [
-          {nil, :composing},
-          {:typing, :composing},
-          {"typing", :composing},
-          {:recording, :recording},
-          {"recording", :recording},
-          {:stop, :paused},
-          {"stop", :paused},
-          {:unknown, :composing}
-        ] do
-      assert :ok =
-               Adapter.start_typing("15551234567@s.whatsapp.net",
-                 conn: self(),
-                 transport: MockTransport,
-                 action: input
-               )
-
-      assert_receive {:send_chatstate, _, "15551234567@s.whatsapp.net", ^expected}
-    end
-  end
-
-  test "metadata, dm opening, pairing code, webhook, and response helpers" do
-    assert {:ok, metadata} = Adapter.fetch_metadata("120363@g.us")
-    assert metadata.id == "120363@g.us"
-    assert metadata.is_dm == false
-
-    assert {:ok, dm_metadata} = Adapter.fetch_metadata("15551234567")
-    assert dm_metadata.id == "15551234567@s.whatsapp.net"
-    assert dm_metadata.is_dm == true
-
-    assert {:ok, "15551234567@s.whatsapp.net"} = Adapter.open_dm("15551234567")
-
-    assert {:ok, "12345678"} =
-             Adapter.request_pairing_code("15551234567", conn: self(), transport: MockTransport)
-
-    assert_receive {:request_pairing_code, _, "15551234567", []}
-
-    request = Jido.Chat.WebhookRequest.new(%{adapter_name: :whatsapp, payload: %{}})
-    assert :ok = Adapter.verify_webhook(request)
-
-    chat = Chat.new(%{id: "whatsapp-test"})
-
-    assert %{status: 200} = Adapter.format_webhook_response({:ok, chat, :noop})
-    assert %{status: 200} = Adapter.format_webhook_response({:ok, chat, %{}})
-    assert %{status: 400} = Adapter.format_webhook_response({:error, :bad_payload})
-  end
-
-  test "listener preserves custom storage over storage_root" do
-    storage = {MyApp.Storage, tenant: "isolated"}
-
-    assert {:ok, [spec]} =
-             Adapter.listener_child_specs("isolated",
-               sink_mfa: {MyApp.Ingress, :emit, []},
-               ingress: %{mode: :linked_device, profile: "isolated", storage: storage, storage_root: "/unused"}
-             )
-
-    {_, _, [opts]} = spec.start
-    assert opts[:config].storage == storage
-  end
-
-  test "listener_child_specs/2 returns linked-device worker spec" do
-    assert {:ok, []} = Adapter.listener_child_specs("bridge_whatsapp", ingress: %{mode: "manual"})
-
-    assert {:error, :invalid_sink_mfa} =
-             Adapter.listener_child_specs("bridge_whatsapp", ingress: %{mode: "linked_device"})
-
-    assert {:ok, [spec]} =
-             Adapter.listener_child_specs("bridge_whatsapp",
-               ingress: %{mode: "linked_device", profile: "test_profile"},
-               sink_mfa: {__MODULE__, :emit, [self()]}
-             )
-
-    assert spec.id == {:whatsapp_connection_worker, "bridge_whatsapp"}
-
-    assert {:error, :invalid_ingress_mode} =
-             Adapter.listener_child_specs("bridge_whatsapp", ingress: %{mode: "bogus"})
-
-    assert {:ok, [amarula_spec]} =
-             Adapter.listener_child_specs("bridge_whatsapp",
-               settings: %{profile: "settings_profile"},
-               ingress: %{
-                 mode: "amarula",
-                 storage_root: "/tmp/amarula",
-                 connect_opts: [name: :wa_conn],
-                 amarula: %{max_retries: 0, retry_delay: 1_000}
-               },
-               sink_mfa: {__MODULE__, :emit, [self()]}
-             )
-
-    worker_opts = amarula_spec.start |> elem(2) |> hd()
-    assert worker_opts[:config].profile == "settings_profile"
-    assert worker_opts[:config].storage_root == "/tmp/amarula"
-    assert worker_opts[:config].max_retries == 0
-    assert worker_opts[:config].retry_delay == 1_000
-    assert worker_opts[:connect_opts] == [name: :wa_conn]
-  end
-
-  def emit(test_pid, payload, opts) do
-    send(test_pid, {:sink_emit, payload, opts})
-    {:ok, :accepted}
+    assert {:error, {:not_attempted, :unsupported}} = Adapter.invoke(value, request, [])
+    refute_receive _
   end
 end

@@ -125,26 +125,6 @@ defmodule Jido.Chat.WhatsApp.RuntimeTest do
     assert Process.whereis(Jido.Chat.WhatsApp.Supervisor) == nil
   end
 
-  test "legacy mode retains an explicitly host-owned shared tree" do
-    :ok = Application.stop(:jido_chat_whatsapp)
-    Application.put_env(:jido_chat_whatsapp, :start_runtime, false)
-
-    on_exit(fn ->
-      Application.stop(:jido_chat_whatsapp)
-      Application.delete_env(:jido_chat_whatsapp, :start_runtime)
-      {:ok, _} = Application.ensure_all_started(:jido_chat_whatsapp)
-    end)
-
-    {:ok, _} = Application.ensure_all_started(:jido_chat_whatsapp)
-    assert Supervisor.which_children(Jido.Chat.WhatsApp.Supervisor) == []
-    assert Process.whereis(Amarula.Supervisor) == nil
-    host_runtime = start_supervised!(Amarula.Supervisor)
-    assert :ok = AmarulaClient.ensure_started([])
-    assert {:ok, ^host_runtime} = AmarulaRuntime.ready()
-    :ok = Application.stop(:jido_chat_whatsapp)
-    assert Process.alive?(host_runtime)
-  end
-
   test "application stop removes its infrastructure and all profiles", %{config: config} do
     {:ok, conn} = AmarulaClient.connect(Map.put(config, :profile, "first"), [])
     ref = Process.monitor(GenServer.whereis(conn))

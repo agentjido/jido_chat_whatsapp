@@ -4,7 +4,7 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
   use ExUnitProperties
 
   alias Amarula.Storage
-  alias Jido.Chat.WhatsApp.Adapter
+  alias Jido.Chat.WhatsApp
   alias Jido.Chat.WhatsApp.Storage.{Mnesia, Split}
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
 
@@ -69,7 +69,7 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
   test "adapter extension clears standalone file configuration without managed storage", %{root: root} do
     storage = Storage.scope({Storage.File, root: root})
     assert :ok = Storage.put(storage, "selected", :creds, :self, "credentials")
-    assert :ok = Adapter.cleanup_connection(nil, profile: "selected", storage_root: root)
+    assert :ok = WhatsApp.cleanup_connection(nil, profile: "selected", storage_root: root)
     assert :error = Storage.get(storage, "selected", :creds, :self)
   end
 
@@ -79,7 +79,7 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
     assert :ok = Split.put(selected, selected.profile, :session, "peer", "ratchet")
     :ets.insert(table, {:selected, "durable"})
 
-    assert :ok = Adapter.cleanup_connection(:selected, sink_mfa: {__MODULE__, :host, [table]}, profile: "untrusted")
+    assert :ok = WhatsApp.cleanup_connection(:selected, sink_mfa: {__MODULE__, :host, [table]}, profile: "untrusted")
     assert :ets.lookup(table, :selected) == []
     assert :error = Split.get(selected, selected.profile, :session, "peer")
   end
@@ -87,7 +87,7 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
   test "adapter extension preserves custom and prebuilt standalone storage", %{table: table} do
     for storage <- [{Store, table: table}, %Storage.Scope{adapter: Store, state: table}] do
       :ets.insert(table, {"selected", "durable"})
-      assert :ok = Adapter.cleanup_connection(nil, profile: "selected", storage: storage)
+      assert :ok = WhatsApp.cleanup_connection(nil, profile: "selected", storage: storage)
       assert :ets.lookup(table, "selected") == []
     end
   end
@@ -97,17 +97,19 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
     state = split(:selected, table)
     assert :ok = Split.put(state, state.profile, :session, "peer", "ratchet")
 
-    assert {:error, _} = Adapter.cleanup_connection(:selected, sink_mfa: {__MODULE__, :deny, []})
+    assert {:error, _} = WhatsApp.cleanup_connection(:selected, sink_mfa: {__MODULE__, :deny, []})
     assert {:ok, "ratchet"} = Split.get(state, state.profile, :session, "peer")
   end
 
   test "adapter extension rejects missing configuration and unsupported transports" do
-    assert {:error, _} = Adapter.cleanup_connection(nil, [])
-    assert {:error, _} = Adapter.cleanup_connection(:binding, [])
-    assert {:error, _} = Adapter.cleanup_connection(:binding, sink_mfa: :invalid)
-    assert {:error, _} = Adapter.cleanup_connection(nil, [:invalid])
-    assert {:error, :unsupported} = Adapter.cleanup_connection(nil, profile: "selected", transport: NoCleanup)
-    assert {:error, :cleanup_failed} = Adapter.cleanup_connection(nil, profile: "selected", transport: InvalidTransport)
+    assert {:error, _} = WhatsApp.cleanup_connection(nil, [])
+    assert {:error, _} = WhatsApp.cleanup_connection(:binding, [])
+    assert {:error, _} = WhatsApp.cleanup_connection(:binding, sink_mfa: :invalid)
+    assert {:error, _} = WhatsApp.cleanup_connection(nil, [:invalid])
+    assert {:error, :unsupported} = WhatsApp.cleanup_connection(nil, profile: "selected", transport: NoCleanup)
+
+    assert {:error, :cleanup_failed} =
+             WhatsApp.cleanup_connection(nil, profile: "selected", transport: InvalidTransport)
   end
 
   test "adapter extension bounds offline cleanup and does not acknowledge an uncertain timeout" do
@@ -115,7 +117,7 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
 
     task =
       Task.async(fn ->
-        Adapter.cleanup_connection(nil,
+        WhatsApp.cleanup_connection(nil,
           profile: "selected",
           transport: BlockingTransport,
           observer: observer,
@@ -175,7 +177,11 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
 
   property "cleanup isolates arbitrary profiles and remains idempotent", %{table: table} do
     check all(
-            profiles <- uniq_list_of(string(:alphanumeric, min_length: 1, max_length: 16), min_length: 2, max_length: 4),
+            profiles <-
+              uniq_list_of(string(:alphanumeric, min_length: 1, max_length: 16),
+                min_length: 2,
+                max_length: 4
+              ),
             max_runs: 30
           ) do
       :ets.delete_all_objects(table)
@@ -275,7 +281,7 @@ defmodule Jido.Chat.WhatsApp.OfflineCleanupTest do
     assert output =~ "default_cleanup=ok"
   end
 
-  def host(table, %Jido.Chat.Storage.Request{binding: binding, request: request}, _) do
+  def host(table, %Jido.Chat.WhatsApp.Storage.Request{binding: binding, request: request}, _) do
     case request do
       %{op: :clear} ->
         :ets.delete(table, binding)

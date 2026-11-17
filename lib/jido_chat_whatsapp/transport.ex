@@ -18,7 +18,7 @@ defmodule Jido.Chat.WhatsApp.Transport do
   in a bounded asynchronous query and makes unavailable identity explicit.
   Optional `health/1` must report persistence failure before pairing/open events
   can be accepted. Custom transports without these callbacks retain message
-  compatibility but must implement their own persistence guarantees.
+  support but must implement their own persistence guarantees.
 
   Configuration includes an isolated `:profile`, optional `:storage` callback
   specification, and `:sync_history` / `:sync_full_history` booleans. See

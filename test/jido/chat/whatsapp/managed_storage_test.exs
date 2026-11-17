@@ -2,8 +2,8 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
   import Jido.Chat.WhatsApp.TestHelpers
   use ExUnit.Case, async: false
 
-  alias Jido.Chat.WhatsApp.Storage.Mnesia
   alias Jido.Chat.WhatsApp.ConnectionWorker
+  alias Jido.Chat.WhatsApp.Storage.Mnesia
 
   defmodule FailingTransport do
     def connect(config, _) do
@@ -221,19 +221,28 @@ defmodule Jido.Chat.WhatsApp.ManagedStorageTest do
     {:ok, self()}
   end
 
-  def lifecycle(observer, %Jido.Chat.EventEnvelope{event_type: :action, payload: %{metadata: payload}}, _),
+  def lifecycle(observer, payload, _),
     do: send(observer, {:lifecycle, payload})
 
   def stop(_, _), do: :ok
   def logout(_, _), do: :ok
   def sink(_, _), do: :ok
+  def discard(_, _, _), do: :ok
 
   defp worker(id, storage, transport \\ __MODULE__) do
+    client =
+      Jido.Chat.Client.new!(Jido.Chat.WhatsApp.Adapter,
+        id: "managed-#{System.unique_integer([:positive])}",
+        config: [profile: to_string(id)],
+        transport: transport
+      )
+
     start_supervised!(
       {ConnectionWorker,
-       bridge_id: to_string(id),
+       client: client,
        transport: transport,
-       sink_mfa: {__MODULE__, :lifecycle, [self()]},
+       admission_mfa: {__MODULE__, :discard, [self()]},
+       lifecycle_mfa: {__MODULE__, :lifecycle, [self()]},
        config: %{profile: to_string(id), storage: storage, observer: self()}},
       id: id,
       restart: :temporary

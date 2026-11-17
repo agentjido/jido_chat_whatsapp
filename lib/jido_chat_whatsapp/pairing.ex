@@ -10,7 +10,7 @@ defmodule Jido.Chat.WhatsApp.Pairing do
   def account(%{phone_number: phone} = identity),
     do: %{external_id: phone, display_name: safe_name(identity[:display_name])}
 
-  @doc "Projects legacy pairing progress into the shared authentication contract."
+  @doc "Projects private pairing progress into the public authentication contract."
   @spec authentication_presentation(map(), term()) :: map()
   def authentication_presentation(status, session) do
     base = Map.take(status, [:summary]) |> Map.put(:session, session)
