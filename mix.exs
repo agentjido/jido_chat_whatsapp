@@ -59,7 +59,7 @@ defmodule Jido.Chat.WhatsApp.MixProject do
   defp deps do
     [
       {:jido_chat, path: "../jido_chat"},
-      {:amarula, "~> 0.5.10"},
+      {:amarula, "~> 0.6.0"},
       {:earmark_parser, "~> 1.4.46"},
       {:protobuf, "~> 0.17.0", override: true},
       {:dotenvy, "~> 1.2"},
