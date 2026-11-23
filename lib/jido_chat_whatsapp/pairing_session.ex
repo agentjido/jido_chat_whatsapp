@@ -225,12 +225,14 @@ defmodule Jido.Chat.WhatsApp.PairingSession do
   end
 
   defp retry_connection(_worker, %{status: :connected, identity: %{phone_number: phone}})
-       when is_binary(phone), do: :ok
+       when is_binary(phone),
+       do: :ok
 
   defp retry_connection(worker, %{status: :connected}), do: ConnectionWorker.refresh_identity(worker)
 
   defp retry_connection(_worker, %{status: status})
-       when status in [:connecting, :reconnecting, :authenticating, :pairing], do: :ok
+       when status in [:connecting, :reconnecting, :authenticating, :pairing],
+       do: :ok
 
   defp retry_connection(worker, _status), do: ConnectionWorker.reconnect(worker)
 

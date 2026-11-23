@@ -2,8 +2,6 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
   use Jido.Chat.WhatsApp.RuntimeCase, async: false
   use ExUnitProperties
 
-  import ExUnit.CaptureLog
-
   alias Jido.Chat.Client
   alias Jido.Chat.WhatsApp.Adapter
   alias Jido.Chat.WhatsApp.Transport.AmarulaClient
@@ -144,12 +142,7 @@ defmodule Jido.Chat.WhatsApp.Transport.AmarulaClientTest do
       media_key: String.duplicate("k", 32)
     }
 
-    log =
-      capture_log(fn ->
-        assert {:error, %ArgumentError{}} = AmarulaClient.download_media(malformed)
-      end)
-
-    assert log =~ "WhatsApp download_media failed"
+    assert {:error, :bad_mac} = AmarulaClient.download_media(malformed)
   end
 
   test "opaque references fetch and decrypt through the real transport using the selected profile" do

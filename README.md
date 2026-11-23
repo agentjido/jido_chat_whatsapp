@@ -14,13 +14,7 @@ owns those functions.
 
 ## Development setup
 
-The current source tree uses the sibling Jido Chat checkout:
-
-```elixir
-{:jido_chat, path: "../jido_chat"}
-```
-
-Get dependencies and run the offline suite:
+Mix fetches the pinned Jido Chat V3 source. Get dependencies and run the offline suite:
 
 ```bash
 mix deps.get
